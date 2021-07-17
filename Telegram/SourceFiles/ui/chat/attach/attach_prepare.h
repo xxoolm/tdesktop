@@ -7,17 +7,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "editor/photo_editor_common.h"
+
 #include <QtCore/QSemaphore>
 #include <deque>
 
 namespace Ui {
 
+class RpWidget;
 class SendFilesWay;
 
 struct PreparedFileInformation {
 	struct Image {
 		QImage data;
 		bool animated = false;
+		Editor::PhotoModifications modifications;
 	};
 	struct Song {
 		int duration = -1;
@@ -131,5 +135,7 @@ struct PreparedGroup {
 
 [[nodiscard]] int MaxAlbumItems();
 [[nodiscard]] bool ValidateThumbDimensions(int width, int height);
+
+[[nodiscard]] QPixmap PrepareSongCoverForThumbnail(QImage image, int size);
 
 } // namespace Ui

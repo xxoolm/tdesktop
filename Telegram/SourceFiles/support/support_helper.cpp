@@ -155,7 +155,7 @@ Data::Draft OccupiedDraft(const QString &normalizedName) {
 			+ normalizedName },
 		MsgId(0),
 		MessageCursor(),
-		false
+		Data::PreviewState::Allowed
 	};
 }
 
@@ -279,7 +279,7 @@ Helper::Helper(not_null<Main::Session*> session)
 		result.match([&](const MTPDhelp_supportName &data) {
 			setSupportName(qs(data.vname()));
 		});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		setSupportName(
 			qsl("[rand^")
 			+ QString::number(Core::Sandbox::Instance().installationTag())
@@ -507,7 +507,7 @@ void Helper::showEditInfoBox(
 			TextUtilities::ConvertTextTagsToEntities(result.tags)
 		}, done);
 	};
-	Ui::show(
+	controller->show(
 		Box<EditInfoBox>(controller, editData, save),
 		Ui::LayerOption::KeepOther);
 }
@@ -544,7 +544,7 @@ void Helper::saveInfo(
 	)).done([=](const MTPhelp_UserInfo &result) {
 		applyInfo(user, result);
 		done(true);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		done(false);
 	}).send();
 }
@@ -576,11 +576,13 @@ QString InterpretSendPath(
 	auto caption = QString();
 	for (const auto &line : lines) {
 		if (line.startsWith(qstr("from: "))) {
-			if (window->session().userId() != line.mid(qstr("from: ").size()).toInt()) {
+			if (window->session().userId().bare
+				!= line.midRef(qstr("from: ").size()).toULongLong()) {
 				return "App Error: Wrong current user.";
 			}
 		} else if (line.startsWith(qstr("channel: "))) {
-			const auto channelId = line.mid(qstr("channel: ").size()).toInt();
+			const auto channelId = line.midRef(
+				qstr("channel: ").size()).toULongLong();
 			toId = peerFromChannel(channelId);
 		} else if (line.startsWith(qstr("file: "))) {
 			const auto path = line.mid(qstr("file: ").size());
@@ -598,7 +600,8 @@ QString InterpretSendPath(
 	}
 	const auto history = window->session().data().historyLoaded(toId);
 	if (!history) {
-		return "App Error: Could not find channel with id: " + QString::number(peerToChannel(toId));
+		return "App Error: Could not find channel with id: "
+			+ QString::number(peerToChannel(toId).bare);
 	}
 	Ui::showPeerHistory(history, ShowAtUnreadMsgId);
 	history->session().api().sendFiles(

@@ -75,14 +75,6 @@ bool finished = true;
 QMargins simpleMargins, margins;
 HICON bigIcon = 0, smallIcon = 0, overlayIcon = 0;
 
-class _PsInitializer {
-public:
-	_PsInitializer() {
-		Dlls::start();
-	}
-};
-_PsInitializer _psInitializer;
-
 BOOL CALLBACK _ActivateProcess(HWND hWnd, LPARAM lParam) {
 	uint64 &processId(*(uint64*)lParam);
 
@@ -104,7 +96,7 @@ BOOL CALLBACK _ActivateProcess(HWND hWnd, LPARAM lParam) {
 	return TRUE;
 }
 
-}
+} // namespace
 
 void psActivateProcess(uint64 pid) {
 	if (pid) {
@@ -143,25 +135,6 @@ void psDoCleanup() {
 		AppUserModelId::cleanupShortcut();
 	} catch (...) {
 	}
-}
-
-QRect psDesktopRect() {
-	static QRect _monitorRect;
-	static crl::time _monitorLastGot = 0;
-	auto tnow = crl::now();
-	if (tnow > _monitorLastGot + 1000LL || tnow < _monitorLastGot) {
-		_monitorLastGot = tnow;
-		HMONITOR hMonitor = MonitorFromWindow(App::wnd()->psHwnd(), MONITOR_DEFAULTTONEAREST);
-		if (hMonitor) {
-			MONITORINFOEX info;
-			info.cbSize = sizeof(info);
-			GetMonitorInfo(hMonitor, &info);
-			_monitorRect = QRect(info.rcWork.left, info.rcWork.top, info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top);
-		} else {
-			_monitorRect = QApplication::desktop()->availableGeometry(App::wnd());
-		}
-	}
-	return _monitorRect;
 }
 
 int psCleanup() {
@@ -263,7 +236,6 @@ void start() {
 } // namespace ThirdParty
 
 void start() {
-	Dlls::init();
 }
 
 void finish() {
@@ -312,26 +284,29 @@ bool AutostartSupported() {
 	return !IsWindowsStoreBuild();
 }
 
-bool ShowWindowMenu(QWindow *window) {
-	const auto pos = QCursor::pos();
-
-	SendMessage(
-		HWND(window->winId()),
-		WM_SYSCOMMAND,
-		SC_MOUSEMENU,
-		MAKELPARAM(pos.x(), pos.y()));
-
-	return true;
-}
-
-Window::ControlsLayout WindowControlsLayout() {
-	return Window::ControlsLayout{
-		.right = {
-			Window::Control::Minimize,
-			Window::Control::Maximize,
-			Window::Control::Close,
-		}
-	};
+void WriteCrashDumpDetails() {
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
+	PROCESS_MEMORY_COUNTERS data = { 0 };
+	if (Dlls::GetProcessMemoryInfo
+		&& Dlls::GetProcessMemoryInfo(
+			GetCurrentProcess(),
+			&data,
+			sizeof(data))) {
+		const auto mb = 1024 * 1024;
+		CrashReports::dump()
+			<< "Memory-usage: "
+			<< (data.PeakWorkingSetSize / mb)
+			<< " MB (peak), "
+			<< (data.WorkingSetSize / mb)
+			<< " MB (current)\n";
+		CrashReports::dump()
+			<< "Pagefile-usage: "
+			<< (data.PeakPagefileUsage / mb)
+			<< " MB (peak), "
+			<< (data.PagefileUsage / mb)
+			<< " MB (current)\n";
+	}
+#endif // DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 } // namespace Platform
@@ -561,31 +536,6 @@ void psAutoStart(bool start, bool silent) {
 
 void psSendToMenu(bool send, bool silent) {
 	_manageAppLnk(send, silent, CSIDL_SENDTO, L"-sendpath", L"Telegram send to link.\nYou can disable send to menu item in Telegram settings.");
-}
-
-void psWriteDump() {
-#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
-	PROCESS_MEMORY_COUNTERS data = { 0 };
-	if (Dlls::GetProcessMemoryInfo
-		&& Dlls::GetProcessMemoryInfo(
-			GetCurrentProcess(),
-			&data,
-			sizeof(data))) {
-		const auto mb = 1024 * 1024;
-		CrashReports::dump()
-			<< "Memory-usage: "
-			<< (data.PeakWorkingSetSize / mb)
-			<< " MB (peak), "
-			<< (data.WorkingSetSize / mb)
-			<< " MB (current)\n";
-		CrashReports::dump()
-			<< "Pagefile-usage: "
-			<< (data.PeakPagefileUsage / mb)
-			<< " MB (peak), "
-			<< (data.PagefileUsage / mb)
-			<< " MB (current)\n";
-	}
-#endif // DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 bool psLaunchMaps(const Data::LocationPoint &point) {

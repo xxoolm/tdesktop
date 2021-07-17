@@ -9,26 +9,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "data/data_peer.h"
 
+enum class ChatDataFlag {
+	Left = (1 << 0),
+	Kicked = (1 << 1),
+	Creator = (1 << 2),
+	Deactivated = (1 << 3),
+	Forbidden = (1 << 4),
+	CallActive = (1 << 5),
+	CallNotEmpty = (1 << 6),
+	CanSetUsername = (1 << 7),
+};
+inline constexpr bool is_flag_type(ChatDataFlag) { return true; };
+using ChatDataFlags = base::flags<ChatDataFlag>;
+
 class ChatData : public PeerData {
 public:
-	static constexpr auto kEssentialFlags = 0
-		| MTPDchat::Flag::f_creator
-		| MTPDchat::Flag::f_kicked
-		| MTPDchat::Flag::f_left
-		| MTPDchat::Flag::f_deactivated
-		| MTPDchat::Flag::f_migrated_to
-		| MTPDchat::Flag::f_admin_rights
-		| MTPDchat::Flag::f_call_not_empty
-		| MTPDchat::Flag::f_default_banned_rights;
-	using Flags = Data::Flags<
-		MTPDchat::Flags,
-		kEssentialFlags>;
-
-	static constexpr auto kEssentialFullFlags = 0
-		| MTPDchatFull::Flag::f_can_set_username;
-	using FullFlags = Data::Flags<
-		MTPDchatFull::Flags,
-		kEssentialFullFlags>;
+	using Flag = ChatDataFlag;
+	using Flags = Data::Flags<ChatDataFlags>;
 
 	using AdminRight = ChatAdminRight;
 	using Restriction = ChatRestriction;
@@ -39,105 +36,89 @@ public:
 
 	ChatData(not_null<Data::Session*> owner, PeerId id);
 
-	void setPhoto(const MTPChatPhoto &photo);
-	void setPhoto(PhotoId photoId, const MTPChatPhoto &photo);
-
 	void setName(const QString &newName);
+	void setPhoto(const MTPChatPhoto &photo);
 
 	void invalidateParticipants();
-	bool noParticipantInfo() const {
+	[[nodiscard]] bool noParticipantInfo() const {
 		return (count > 0 || amIn()) && participants.empty();
 	}
 
-	void setFlags(MTPDchat::Flags which) {
+	void setFlags(ChatDataFlags which) {
 		_flags.set(which);
 	}
-	void addFlags(MTPDchat::Flags which) {
+	void addFlags(ChatDataFlags which) {
 		_flags.add(which);
 	}
-	void removeFlags(MTPDchat::Flags which) {
+	void removeFlags(ChatDataFlags which) {
 		_flags.remove(which);
 	}
-	auto flags() const {
+	[[nodiscard]] auto flags() const {
 		return _flags.current();
 	}
-	auto flagsValue() const {
+	[[nodiscard]] auto flagsValue() const {
 		return _flags.value();
 	}
 
-	void setFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.set(which);
-	}
-	void addFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.add(which);
-	}
-	void removeFullFlags(MTPDchatFull::Flags which) {
-		_fullFlags.remove(which);
-	}
-	auto fullFlags() const {
-		return _fullFlags.current();
-	}
-	auto fullFlagsValue() const {
-		return _fullFlags.value();
-	}
-
-	auto adminRights() const {
+	[[nodiscard]] auto adminRights() const {
 		return _adminRights.current();
 	}
-	auto adminRightsValue() const {
+	[[nodiscard]] auto adminRightsValue() const {
 		return _adminRights.value();
 	}
-	void setAdminRights(const MTPChatAdminRights &rights);
-	bool hasAdminRights() const {
+	void setAdminRights(ChatAdminRights rights);
+	[[nodiscard]] bool hasAdminRights() const {
 		return (adminRights() != 0);
 	}
 
-	auto defaultRestrictions() const {
+	[[nodiscard]] auto defaultRestrictions() const {
 		return _defaultRestrictions.current();
 	}
-	auto defaultRestrictionsValue() const {
+	[[nodiscard]] auto defaultRestrictionsValue() const {
 		return _defaultRestrictions.value();
 	}
-	void setDefaultRestrictions(const MTPChatBannedRights &rights);
+	void setDefaultRestrictions(ChatRestrictions rights);
 
-	bool isForbidden() const {
-		return flags() & MTPDchat_ClientFlag::f_forbidden;
+	[[nodiscard]] bool isForbidden() const {
+		return flags() & Flag::Forbidden;
 	}
-	bool amIn() const {
+	[[nodiscard]] bool amIn() const {
 		return !isForbidden()
 			&& !isDeactivated()
 			&& !haveLeft()
 			&& !wasKicked();
 	}
-	bool haveLeft() const {
-		return flags() & MTPDchat::Flag::f_left;
+	[[nodiscard]] bool haveLeft() const {
+		return flags() & ChatDataFlag::Left;
 	}
-	bool wasKicked() const {
-		return flags() & MTPDchat::Flag::f_kicked;
+	[[nodiscard]] bool wasKicked() const {
+		return flags() & ChatDataFlag::Kicked;
 	}
-	bool amCreator() const {
-		return flags() & MTPDchat::Flag::f_creator;
+	[[nodiscard]] bool amCreator() const {
+		return flags() & ChatDataFlag::Creator;
 	}
-	bool isDeactivated() const {
-		return flags() & MTPDchat::Flag::f_deactivated;
+	[[nodiscard]] bool isDeactivated() const {
+		return flags() & ChatDataFlag::Deactivated;
 	}
-	bool isMigrated() const {
-		return flags() & MTPDchat::Flag::f_migrated_to;
+	[[nodiscard]] bool isMigrated() const {
+		return (_migratedTo != nullptr);
 	}
 
-	static AdminRights DefaultAdminRights();
+	[[nodiscard]] ChatAdminRightsInfo defaultAdminRights(
+		not_null<UserData*> user);
 
 	// Like in ChannelData.
-	bool canWrite() const;
-	bool canEditInformation() const;
-	bool canEditPermissions() const;
-	bool canEditUsername() const;
-	bool canEditPreHistoryHidden() const;
-	bool canAddMembers() const;
-	bool canAddAdmins() const;
-	bool canBanMembers() const;
-	bool canSendPolls() const;
-	bool anyoneCanAddMembers() const;
+	[[nodiscard]] bool canWrite() const;
+	[[nodiscard]] bool canEditInformation() const;
+	[[nodiscard]] bool canEditPermissions() const;
+	[[nodiscard]] bool canEditUsername() const;
+	[[nodiscard]] bool canEditPreHistoryHidden() const;
+	[[nodiscard]] bool canDeleteMessages() const;
+	[[nodiscard]] bool canAddMembers() const;
+	[[nodiscard]] bool canAddAdmins() const;
+	[[nodiscard]] bool canBanMembers() const;
+	[[nodiscard]] bool canSendPolls() const;
+	[[nodiscard]] bool anyoneCanAddMembers() const;
 
 	void applyEditAdmin(not_null<UserData*> user, bool isAdmin);
 
@@ -167,8 +148,21 @@ public:
 	[[nodiscard]] Data::GroupCall *groupCall() const {
 		return _call.get();
 	}
-	void setGroupCall(const MTPInputGroupCall &call);
+	void setGroupCall(
+		const MTPInputGroupCall &call,
+		TimeId scheduleDate = 0);
 	void clearGroupCall();
+	void setGroupCallDefaultJoinAs(PeerId peerId);
+	[[nodiscard]] PeerId groupCallDefaultJoinAs() const;
+
+	void setBotCommands(const MTPVector<MTPBotInfo> &data);
+	void setBotCommands(
+		UserId botId,
+		const MTPVector<MTPBotCommand> &data);
+	[[nodiscard]] auto botCommands() const
+		-> const base::flat_map<UserId, std::vector<BotCommand>> & {
+		return _botCommands;
+	}
 
 	// Still public data members.
 	const MTPint inputChat;
@@ -186,7 +180,6 @@ public:
 
 private:
 	Flags _flags;
-	FullFlags _fullFlags;
 	QString _inviteLink;
 
 	RestrictionFlags _defaultRestrictions;
@@ -194,6 +187,8 @@ private:
 	int _version = 0;
 
 	std::unique_ptr<Data::GroupCall> _call;
+	PeerId _callDefaultJoinAs = 0;
+	base::flat_map<UserId, std::vector<BotCommand>> _botCommands;
 
 	ChannelData *_migratedTo = nullptr;
 	rpl::lifetime _lifetime;

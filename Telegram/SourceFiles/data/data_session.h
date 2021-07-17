@@ -78,6 +78,8 @@ public:
 		return *_session;
 	}
 
+	[[nodiscard]] QString nameSortKey(const QString &name) const;
+
 	[[nodiscard]] Groups &groups() {
 		return _groups;
 	}
@@ -213,8 +215,8 @@ public:
 
 	void userIsBotChanged(not_null<UserData*> user);
 	[[nodiscard]] rpl::producer<not_null<UserData*>> userIsBotChanges() const;
-	void botCommandsChanged(not_null<UserData*> user);
-	[[nodiscard]] rpl::producer<not_null<UserData*>> botCommandsChanges() const;
+	void botCommandsChanged(not_null<PeerData*> peer);
+	[[nodiscard]] rpl::producer<not_null<PeerData*>> botCommandsChanges() const;
 
 	struct ItemVisibilityQuery {
 		not_null<HistoryItem*> item;
@@ -325,8 +327,15 @@ public:
 		const Dialogs::Key &key1,
 		const Dialogs::Key &key2);
 
+	void setSuggestToGigagroup(not_null<ChannelData*> group, bool suggest);
+	[[nodiscard]] bool suggestToGigagroup(
+		not_null<ChannelData*> group) const;
+
 	void registerMessage(not_null<HistoryItem*> item);
 	void unregisterMessage(not_null<HistoryItem*> item);
+
+	void registerMessageTTL(TimeId when, not_null<HistoryItem*> item);
+	void unregisterMessageTTL(TimeId when, not_null<HistoryItem*> item);
 
 	// Returns true if item found and it is not detached.
 	bool checkEntitiesAndViewsUpdate(const MTPDmessage &data);
@@ -357,6 +366,8 @@ public:
 	void unregisterDependentMessage(
 		not_null<HistoryItem*> dependent,
 		not_null<HistoryItem*> dependency);
+
+	void destroyAllCallItems();
 
 	void registerMessageRandomId(uint64 randomId, FullMsgId itemId);
 	void unregisterMessageRandomId(uint64 randomId);
@@ -465,7 +476,7 @@ public:
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const QByteArray &inlineThumbnailBytes,
+		const InlineImageLocation &inlineThumbnail,
 		const ImageWithLocation &thumbnail,
 		const ImageWithLocation &videoThumbnail,
 		int32 dc,
@@ -570,6 +581,8 @@ public:
 	void unregisterContactItem(
 		UserId contactId,
 		not_null<HistoryItem*> item);
+	void registerCallItem(not_null<HistoryItem*> item);
+	void unregisterCallItem(not_null<HistoryItem*> item);
 
 	void documentMessageRemoved(not_null<DocumentData*> document);
 
@@ -596,9 +609,6 @@ public:
 	[[nodiscard]] Folder *folderLoaded(FolderId id) const;
 	not_null<Folder*> processFolder(const MTPFolder &data);
 	not_null<Folder*> processFolder(const MTPDfolder &data);
-	//void setDefaultFeedId(FeedId id); // #feed
-	//FeedId defaultFeedId() const;
-	//rpl::producer<FeedId> defaultFeedIdValue() const;
 
 	[[nodiscard]] not_null<Dialogs::MainList*> chatsList(
 		Data::Folder *folder = nullptr);
@@ -682,6 +692,9 @@ private:
 
 	void checkSelfDestructItems();
 
+	void scheduleNextTTLs();
+	void checkTTLs();
+
 	int computeUnreadBadge(const Dialogs::UnreadState &state) const;
 	bool computeUnreadBadgeMuted(const Dialogs::UnreadState &state) const;
 
@@ -730,7 +743,7 @@ private:
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const QByteArray &inlineThumbnailBytes,
+		const InlineImageLocation &inlineThumbnail,
 		const ImageWithLocation &thumbnail,
 		const ImageWithLocation &videoThumbnail,
 		int32 dc,
@@ -818,7 +831,7 @@ private:
 	rpl::event_stream<Data::Folder*> _chatsListLoadedEvents;
 	rpl::event_stream<Data::Folder*> _chatsListChanged;
 	rpl::event_stream<not_null<UserData*>> _userIsBotChanges;
-	rpl::event_stream<not_null<UserData*>> _botCommandsChanges;
+	rpl::event_stream<not_null<PeerData*>> _botCommandsChanges;
 	base::Observable<ItemVisibilityQuery> _queryItemVisibility;
 	rpl::event_stream<IdChange> _itemIdChanges;
 	rpl::event_stream<not_null<const HistoryItem*>> _itemLayoutChanges;
@@ -853,6 +866,8 @@ private:
 	std::map<
 		not_null<HistoryItem*>,
 		base::flat_set<not_null<HistoryItem*>>> _dependentMessages;
+	std::map<TimeId, base::flat_set<not_null<HistoryItem*>>> _ttlMessages;
+	base::Timer _ttlCheckTimer;
 
 	base::flat_map<uint64, FullMsgId> _messageByRandomId;
 	base::flat_map<uint64, SentData> _sentMessagesData;
@@ -908,6 +923,7 @@ private:
 	std::unordered_map<
 		UserId,
 		base::flat_set<not_null<ViewElement*>>> _contactViews;
+	std::unordered_set<not_null<HistoryItem*>> _callItems;
 
 	base::flat_set<not_null<WebPageData*>> _webpagesUpdated;
 	base::flat_set<not_null<GameData*>> _gamesUpdated;
@@ -915,12 +931,12 @@ private:
 
 	rpl::event_stream<not_null<WebPageData*>> _webpageUpdates;
 	rpl::event_stream<not_null<ChannelData*>> _channelDifferenceTooLong;
+	base::flat_set<not_null<ChannelData*>> _suggestToGigagroup;
 
 	base::flat_multi_map<TimeId, not_null<PollData*>> _pollsClosings;
 	base::Timer _pollsClosingTimer;
 
 	base::flat_map<FolderId, std::unique_ptr<Folder>> _folders;
-	//rpl::variable<FeedId> _defaultFeedId = FeedId(); // #feed
 
 	std::unordered_map<
 		not_null<const HistoryItem*>,

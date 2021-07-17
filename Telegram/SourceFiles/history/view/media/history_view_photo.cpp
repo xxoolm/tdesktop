@@ -26,6 +26,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_streaming.h"
 #include "data/data_photo.h"
 #include "data/data_photo_media.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
 #include "data/data_auto_download.h"
 #include "core/application.h"
@@ -86,9 +87,17 @@ Photo::~Photo() {
 
 void Photo::create(FullMsgId contextId, PeerData *chat) {
 	setLinks(
-		std::make_shared<PhotoOpenClickHandler>(_data, contextId, chat),
+		std::make_shared<PhotoOpenClickHandler>(
+			_data,
+			crl::guard(this, [=](FullMsgId id) { showPhoto(id); }),
+			contextId),
 		std::make_shared<PhotoSaveClickHandler>(_data, contextId, chat),
-		std::make_shared<PhotoCancelClickHandler>(_data, contextId, chat));
+		std::make_shared<PhotoCancelClickHandler>(
+			_data,
+			crl::guard(this, [=](FullMsgId id) {
+				_parent->delegate()->elementCancelUpload(id);
+			}),
+			contextId));
 	if ((_dataMedia = _data->activeMediaView())) {
 		dataMediaCreated();
 	} else if (_data->inlineThumbnailBytes().isEmpty()
@@ -109,7 +118,8 @@ void Photo::ensureDataMediaCreated() const {
 void Photo::dataMediaCreated() const {
 	Expects(_dataMedia != nullptr);
 
-	if (!_dataMedia->image(PhotoSize::Large)
+	if (_data->inlineThumbnailBytes().isEmpty()
+		&& !_dataMedia->image(PhotoSize::Large)
 		&& !_dataMedia->image(PhotoSize::Thumbnail)) {
 		_dataMedia->wanted(PhotoSize::Small, _realParent->fullId());
 	}
@@ -376,10 +386,10 @@ void Photo::paintUserpicFrame(
 		if (const auto large = _dataMedia->image(PhotoSize::Large)) {
 			return large->pixCircled(_pixw, _pixh);
 		} else if (const auto thumbnail = _dataMedia->image(
-			PhotoSize::Thumbnail)) {
+				PhotoSize::Thumbnail)) {
 			return thumbnail->pixBlurredCircled(_pixw, _pixh);
 		} else if (const auto small = _dataMedia->image(
-			PhotoSize::Small)) {
+				PhotoSize::Small)) {
 			return small->pixBlurredCircled(_pixw, _pixh);
 		} else if (const auto blurred = _dataMedia->thumbnailInline()) {
 			return blurred->pixBlurredCircled(_pixw, _pixh);
@@ -485,6 +495,7 @@ void Photo::drawGrouped(
 		const QRect &geometry,
 		RectParts sides,
 		RectParts corners,
+		float64 highlightOpacity,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const {
 	ensureDataMediaCreated();
@@ -509,9 +520,18 @@ void Photo::drawGrouped(
 //		App::roundShadow(p, 0, 0, paintw, painth, selected ? st::msgInShadowSelected : st::msgInShadow, selected ? InSelectedShadowCorners : InShadowCorners);
 	}
 	p.drawPixmap(geometry.topLeft(), *cache);
-	if (selected) {
+
+	const auto overlayOpacity = selected
+		? (1. - highlightOpacity)
+		: highlightOpacity;
+	if (overlayOpacity > 0.) {
+		p.setOpacity(overlayOpacity);
 		const auto roundRadius = ImageRoundRadius::Large;
 		Ui::FillComplexOverlayRect(p, geometry, roundRadius, corners);
+		if (!selected) {
+			Ui::FillComplexOverlayRect(p, geometry, roundRadius, corners);
+		}
+		p.setOpacity(1.);
 	}
 
 	const auto displayState = radial
@@ -760,7 +780,7 @@ void Photo::playAnimation(bool autoplay) {
 	if (_streamed && autoplay) {
 		return;
 	} else if (_streamed && videoAutoplayEnabled()) {
-		Core::App().showPhoto(_data, _parent->data());
+		showPhoto(_parent->data()->fullId());
 		return;
 	}
 	if (_streamed) {
@@ -831,6 +851,10 @@ void Photo::parentTextUpdated() {
 		? createCaption(_parent->data())
 		: Ui::Text::String();
 	history()->owner().requestViewResize(_parent);
+}
+
+void Photo::showPhoto(FullMsgId id) {
+	_parent->delegate()->elementOpenPhoto(_data, id);
 }
 
 } // namespace HistoryView

@@ -105,6 +105,7 @@ bool SendActionPainter::updateNeedsAnimating(
 		_speaking.emplace_or_assign(
 			user,
 			now + kStatusShowClientsideSpeaking);
+	}, [&](const MTPDsendMessageHistoryImportAction &) {
 	}, [&](const MTPDsendMessageCancelAction &) {
 		Unexpected("CancelAction here.");
 	});
@@ -231,7 +232,7 @@ bool SendActionPainter::updateNeedsAnimating(crl::time now, bool force) {
 				};
 				return QString();
 			};
-			for (const auto [user, action] : _sendActions) {
+			for (const auto &[user, action] : _sendActions) {
 				newTypingString = sendActionString(
 					action.type,
 					_history->peer->isUser() ? QString() : user->firstName);

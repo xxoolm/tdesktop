@@ -14,27 +14,30 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/weak_ptr.h"
 #include "info/profile/info_profile_members_controllers.h"
 
+struct ChatAdminRightsInfo;
+struct ChatRestrictionsInfo;
+
 namespace Window {
 class SessionNavigation;
 } // namespace Window
 
 Fn<void(
-	const MTPChatAdminRights &oldRights,
-	const MTPChatAdminRights &newRights,
+	ChatAdminRightsInfo oldRights,
+	ChatAdminRightsInfo newRights,
 	const QString &rank)> SaveAdminCallback(
 		not_null<PeerData*> peer,
 		not_null<UserData*> user,
 		Fn<void(
-			const MTPChatAdminRights &newRights,
+			ChatAdminRightsInfo newRights,
 			const QString &rank)> onDone,
 		Fn<void()> onFail);
 
 Fn<void(
-	const MTPChatBannedRights &oldRights,
-	const MTPChatBannedRights &newRights)> SaveRestrictedCallback(
+	ChatRestrictionsInfo oldRights,
+	ChatRestrictionsInfo newRights)> SaveRestrictedCallback(
 		not_null<PeerData*> peer,
-		not_null<UserData*> user,
-		Fn<void(const MTPChatBannedRights &newRights)> onDone,
+		not_null<PeerData*> participant,
+		Fn<void(ChatRestrictionsInfo newRights)> onDone,
 		Fn<void()> onFail);
 
 void SubscribeToMigration(
@@ -77,37 +80,39 @@ public:
 
 	ParticipantsAdditionalData(not_null<PeerData*> peer, Role role);
 
-	UserData *applyParticipant(const MTPChannelParticipant &data);
-	UserData *applyParticipant(
+	PeerData *applyParticipant(const MTPChannelParticipant &data);
+	PeerData *applyParticipant(
 		const MTPChannelParticipant &data,
 		Role overrideRole);
-	void setExternal(not_null<UserData*> user);
-	void checkForLoaded(not_null<UserData*> user);
+	void setExternal(not_null<PeerData*> participant);
+	void checkForLoaded(not_null<PeerData*> participant);
 	void fillFromPeer();
 
-	[[nodiscard]] bool infoLoaded(not_null<UserData*> user) const;
+	[[nodiscard]] bool infoLoaded(not_null<PeerData*> participant) const;
 	[[nodiscard]] bool canEditAdmin(not_null<UserData*> user) const;
 	[[nodiscard]] bool canAddOrEditAdmin(not_null<UserData*> user) const;
-	[[nodiscard]] bool canRestrictUser(not_null<UserData*> user) const;
-	[[nodiscard]] bool canRemoveUser(not_null<UserData*> user) const;
-	[[nodiscard]] std::optional<MTPChatAdminRights> adminRights(
+	[[nodiscard]] bool canRestrictParticipant(
+		not_null<PeerData*> participant) const;
+	[[nodiscard]] bool canRemoveParticipant(
+		not_null<PeerData*> participant) const;
+	[[nodiscard]] std::optional<ChatAdminRightsInfo> adminRights(
 		not_null<UserData*> user) const;
 	QString adminRank(not_null<UserData*> user) const;
-	[[nodiscard]] std::optional<MTPChatBannedRights> restrictedRights(
-		not_null<UserData*> user) const;
+	[[nodiscard]] std::optional<ChatRestrictionsInfo> restrictedRights(
+		not_null<PeerData*> participant) const;
 	[[nodiscard]] bool isCreator(not_null<UserData*> user) const;
-	[[nodiscard]] bool isExternal(not_null<UserData*> user) const;
-	[[nodiscard]] bool isKicked(not_null<UserData*> user) const;
+	[[nodiscard]] bool isExternal(not_null<PeerData*> participant) const;
+	[[nodiscard]] bool isKicked(not_null<PeerData*> participant) const;
 	[[nodiscard]] UserData *adminPromotedBy(not_null<UserData*> user) const;
-	[[nodiscard]] UserData *restrictedBy(not_null<UserData*> user) const;
+	[[nodiscard]] UserData *restrictedBy(not_null<PeerData*> participant) const;
 
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 
 private:
 	UserData *applyCreator(const MTPDchannelParticipantCreator &data);
 	UserData *applyAdmin(const MTPDchannelParticipantAdmin &data);
 	UserData *applyRegular(MTPint userId);
-	UserData *applyBanned(const MTPDchannelParticipantBanned &data);
+	PeerData *applyBanned(const MTPDchannelParticipantBanned &data);
 	void fillFromChat(not_null<ChatData*> chat);
 	void fillFromChannel(not_null<ChannelData*> channel);
 
@@ -120,15 +125,15 @@ private:
 	base::flat_set<not_null<UserData*>> _admins;
 
 	// Data for channels.
-	base::flat_map<not_null<UserData*>, MTPChatAdminRights> _adminRights;
+	base::flat_map<not_null<UserData*>, ChatAdminRightsInfo> _adminRights;
 	base::flat_map<not_null<UserData*>, QString> _adminRanks;
 	base::flat_set<not_null<UserData*>> _adminCanEdit;
 	base::flat_map<not_null<UserData*>, not_null<UserData*>> _adminPromotedBy;
-	std::map<not_null<UserData*>, MTPChatBannedRights> _restrictedRights;
-	std::set<not_null<UserData*>> _kicked;
-	std::map<not_null<UserData*>, not_null<UserData*>> _restrictedBy;
-	std::set<not_null<UserData*>> _external;
-	std::set<not_null<UserData*>> _infoNotLoaded;
+	std::map<not_null<PeerData*>, ChatRestrictionsInfo> _restrictedRights;
+	std::set<not_null<PeerData*>> _kicked;
+	std::map<not_null<PeerData*>, not_null<UserData*>> _restrictedBy;
+	std::set<not_null<PeerData*>> _external;
+	std::set<not_null<PeerData*>> _infoNotLoaded;
 
 };
 
@@ -181,7 +186,7 @@ protected:
 		Role role);
 
 	virtual std::unique_ptr<PeerListRow> createRow(
-		not_null<UserData*> user) const;
+		not_null<PeerData*> participant) const;
 
 private:
 	using Row = Info::Profile::MemberListRow;
@@ -219,30 +224,32 @@ private:
 	void showAdmin(not_null<UserData*> user);
 	void editAdminDone(
 		not_null<UserData*> user,
-		const MTPChatAdminRights &rights,
+		ChatAdminRightsInfo rights,
 		const QString &rank);
 	void showRestricted(not_null<UserData*> user);
 	void editRestrictedDone(
-		not_null<UserData*> user,
-		const MTPChatBannedRights &rights);
-	void removeKicked(not_null<PeerListRow*> row, not_null<UserData*> user);
-	void removeKickedWithRow(not_null<UserData*> user);
-	void removeKicked(not_null<UserData*> user);
-	void kickMember(not_null<UserData*> user);
-	void kickMemberSure(not_null<UserData*> user);
-	void unkickMember(not_null<UserData*> user);
+		not_null<PeerData*> participant,
+		ChatRestrictionsInfo rights);
+	void removeKicked(
+		not_null<PeerListRow*> row,
+		not_null<PeerData*> participant);
+	void removeKickedWithRow(not_null<PeerData*> participant);
+	void removeKicked(not_null<PeerData*> participant);
+	void kickParticipant(not_null<PeerData*> participant);
+	void kickParticipantSure(not_null<PeerData*> participant);
+	void unkickParticipant(not_null<UserData*> user);
 	void removeAdmin(not_null<UserData*> user);
 	void removeAdminSure(not_null<UserData*> user);
-	bool appendRow(not_null<UserData*> user);
-	bool prependRow(not_null<UserData*> user);
-	bool removeRow(not_null<UserData*> user);
+	bool appendRow(not_null<PeerData*> participant);
+	bool prependRow(not_null<PeerData*> participant);
+	bool removeRow(not_null<PeerData*> participant);
 	void refreshCustomStatus(not_null<PeerListRow*> row) const;
 	bool feedMegagroupLastParticipants();
-	Type computeType(not_null<UserData*> user) const;
-	void recomputeTypeFor(not_null<UserData*> user);
+	Type computeType(not_null<PeerData*> participant) const;
+	void recomputeTypeFor(not_null<PeerData*> participant);
 
 	void subscribeToMigration();
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 	void subscribeToCreatorChange(not_null<ChannelData*> channel);
 	void fullListRefresh();
 

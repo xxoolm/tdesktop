@@ -31,18 +31,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h" // Account::sessionValue.
 #include "main/main_domain.h"
 #include "mainwidget.h"
+#include "media/system_media_controls_manager.h"
 #include "boxes/confirm_box.h"
-#include "boxes/add_contact_box.h"
 #include "boxes/connection_box.h"
 #include "storage/storage_account.h"
 #include "storage/localstorage.h"
 #include "apiwrap.h"
 #include "api/api_updates.h"
 #include "settings/settings_intro.h"
-#include "platform/platform_specific.h"
 #include "platform/platform_notifications_manager.h"
 #include "base/platform/base_platform_info.h"
+#include "ui/platform/ui_platform_utility.h"
 #include "base/call_delayed.h"
+#include "base/variant.h"
 #include "window/notifications_manager.h"
 #include "window/themes/window_theme.h"
 #include "window/themes/window_theme_warning.h"
@@ -52,7 +53,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_session_controller.h"
 #include "window/window_media_preview.h"
 #include "facades.h"
-#include "app.h"
 #include "styles/style_dialogs.h"
 #include "styles/style_layers.h"
 #include "styles/style_window.h"
@@ -83,6 +83,7 @@ void FeedLangTestingKey(int key) {
 
 MainWindow::MainWindow(not_null<Window::Controller*> controller)
 : Platform::MainWindow(controller) {
+
 	auto logo = Core::App().logo();
 	icon16 = logo.scaledToWidth(16, Qt::SmoothTransformation);
 	icon32 = logo.scaledToWidth(32, Qt::SmoothTransformation);
@@ -97,9 +98,12 @@ MainWindow::MainWindow(not_null<Window::Controller*> controller)
 
 	setLocale(QLocale(QLocale::English, QLocale::UnitedStates));
 
-	subscribe(Window::Theme::Background(), [this](const Window::Theme::BackgroundUpdate &data) {
+	using Window::Theme::BackgroundUpdate;
+	Window::Theme::Background()->updates(
+	) | rpl::start_with_next([=](const BackgroundUpdate &data) {
 		themeUpdated(data);
-	});
+	}, lifetime());
+
 	Core::App().passcodeLockChanges(
 	) | rpl::start_with_next([=] {
 		updateGlobalMenu();
@@ -112,7 +116,7 @@ MainWindow::MainWindow(not_null<Window::Controller*> controller)
 
 	setAttribute(Qt::WA_NoSystemBackground);
 
-	if (Platform::WindowsNeedShadow()) {
+	if (Ui::Platform::WindowExtentsSupported()) {
 		setAttribute(Qt::WA_TranslucentBackground);
 	} else {
 		setAttribute(Qt::WA_OpaquePaintEvent);
@@ -131,6 +135,11 @@ void MainWindow::initHook() {
 		this,
 		[=] { checkHistoryActivation(); },
 		Qt::QueuedConnection);
+
+	if (Media::SystemMediaControlsManager::Supported()) {
+		using MediaManager = Media::SystemMediaControlsManager;
+		_mediaControlsManager = std::make_unique<MediaManager>(&controller());
+	}
 }
 
 void MainWindow::createTrayIconMenu() {
@@ -139,26 +148,54 @@ void MainWindow::createTrayIconMenu() {
 	trayIconMenu->deleteOnHide(false);
 #else // Q_OS_WIN
 	trayIconMenu = new QMenu(this);
+
+	connect(trayIconMenu, &QMenu::aboutToShow, [=] {
+		updateIsActive();
+		updateTrayMenu();
+	});
 #endif // else for Q_OS_WIN
 
-	auto notificationActionText = Core::App().settings().desktopNotify()
-		? tr::lng_disable_notifications_from_tray(tr::now)
-		: tr::lng_enable_notifications_from_tray(tr::now);
+	const auto minimizeAction = trayIconMenu->addAction(QString(), [=] {
+		if (_activeForTrayIconAction) {
+			minimizeToTray();
+		} else {
+			showFromTrayMenu();
+		}
+	});
+	const auto notificationAction = trayIconMenu->addAction(QString(), [=] {
+		toggleDisplayNotifyFromTray();
+	});
+	trayIconMenu->addAction(tr::lng_quit_from_tray(tr::now), [=] {
+		quitFromTray();
+	});
 
-	if (Platform::IsLinux() && !Platform::IsWayland()) {
-		trayIconMenu->addAction(tr::lng_open_from_tray(tr::now), this, SLOT(showFromTray()));
-	}
-	trayIconMenu->addAction(tr::lng_minimize_to_tray(tr::now), this, SLOT(minimizeToTray()));
-	trayIconMenu->addAction(notificationActionText, this, SLOT(toggleDisplayNotifyFromTray()));
-	trayIconMenu->addAction(tr::lng_quit_from_tray(tr::now), this, SLOT(quitFromTray()));
+	_updateTrayMenuTextActions.events(
+	) | rpl::start_with_next([=] {
+		if (!trayIconMenu) {
+			return;
+		}
+
+		_activeForTrayIconAction = isActiveForTrayMenu();
+		minimizeAction->setText(_activeForTrayIconAction
+			? tr::lng_minimize_to_tray(tr::now)
+			: tr::lng_open_from_tray(tr::now));
+
+		auto notificationActionText = Core::App().settings().desktopNotify()
+			? tr::lng_disable_notifications_from_tray(tr::now)
+			: tr::lng_enable_notifications_from_tray(tr::now);
+		notificationAction->setText(notificationActionText);
+	}, lifetime());
+
+	_updateTrayMenuTextActions.fire({});
 
 	initTrayMenuHook();
 }
 
 void MainWindow::applyInitialWorkMode() {
-	Global::RefWorkMode().setForced(Global::WorkMode().value(), true);
+	const auto workMode = Core::App().settings().workMode();
+	workmodeUpdated(workMode);
 
-	if (cWindowPos().maximized) {
+	if (Core::App().settings().windowPosition().maximized) {
 		DEBUG_LOG(("Window Pos: First show, setting maximized."));
 		setWindowState(Qt::WindowMaximized);
 	}
@@ -169,8 +206,8 @@ void MainWindow::applyInitialWorkMode() {
 		const auto minimizeAndHide = [=] {
 			DEBUG_LOG(("Window Pos: First show, setting minimized after."));
 			setWindowState(windowState() | Qt::WindowMinimized);
-			if (Global::WorkMode().value() == dbiwmTrayOnly
-				|| Global::WorkMode().value() == dbiwmWindowAndTray) {
+			if (workMode == Core::Settings::WorkMode::TrayOnly
+				|| workMode == Core::Settings::WorkMode::WindowAndTray) {
 				hide();
 			}
 		};
@@ -193,7 +230,6 @@ void MainWindow::finishFirstShow() {
 	applyInitialWorkMode();
 	createGlobalMenu();
 	firstShadowsUpdate();
-	updateTrayMenu();
 
 	windowDeactivateEvents(
 	) | rpl::start_with_next([=] {
@@ -276,7 +312,16 @@ void MainWindow::setupIntro(Intro::EnterPoint point) {
 	auto bg = animated ? grabInner() : QPixmap();
 
 	destroyLayer();
-	auto created = object_ptr<Intro::Widget>(bodyWidget(), &account(), point);
+	auto created = object_ptr<Intro::Widget>(
+		bodyWidget(),
+		&controller(),
+		&account(),
+		point);
+	created->showSettingsRequested(
+	) | rpl::start_with_next([=] {
+		showSettings();
+	}, created->lifetime());
+
 	clearWidgets();
 	_intro = std::move(created);
 	if (_passcodeLock) {
@@ -330,9 +375,6 @@ void MainWindow::setupMain() {
 }
 
 void MainWindow::showSettings() {
-	if (isHidden()) {
-		showFromTray();
-	}
 	if (_passcodeLock) {
 		return;
 	}
@@ -441,13 +483,21 @@ MainWidget *MainWindow::sessionContent() const {
 	return _main.data();
 }
 
-void MainWindow::ui_showBox(
-		object_ptr<Ui::BoxContent> box,
+void MainWindow::showBoxOrLayer(
+		std::variant<
+			v::null_t,
+			object_ptr<Ui::BoxContent>,
+			std::unique_ptr<Ui::LayerWidget>> &&layer,
 		Ui::LayerOptions options,
 		anim::type animated) {
-	if (box) {
+	using UniqueLayer = std::unique_ptr<Ui::LayerWidget>;
+	using ObjectBox = object_ptr<Ui::BoxContent>;
+	if (auto layerWidget = std::get_if<UniqueLayer>(&layer)) {
 		ensureLayerCreated();
-		_layer->showBox(std::move(box), options, animated);
+		_layer->showLayer(std::move(*layerWidget), options, animated);
+	} else if (auto box = std::get_if<ObjectBox>(&layer); *box != nullptr) {
+		ensureLayerCreated();
+		_layer->showBox(std::move(*box), options, animated);
 	} else {
 		if (_layer) {
 			_layer->hideTopLayer(animated);
@@ -459,6 +509,20 @@ void MainWindow::ui_showBox(
 		}
 		Core::App().hideMediaView();
 	}
+}
+
+void MainWindow::ui_showBox(
+		object_ptr<Ui::BoxContent> box,
+		Ui::LayerOptions options,
+		anim::type animated) {
+	showBoxOrLayer(std::move(box), options, animated);
+}
+
+void MainWindow::showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated) {
+	showBoxOrLayer(std::move(layer), options, animated);
 }
 
 bool MainWindow::ui_isLayerShown() {
@@ -510,7 +574,7 @@ void MainWindow::themeUpdated(const Window::Theme::BackgroundUpdate &data) {
 	using Type = Window::Theme::BackgroundUpdate::Type;
 
 	// We delay animating theme warning because we want all other
-	// subscribers to receive paltte changed notification before any
+	// subscribers to receive palette changed notification before any
 	// animations (that include pixmap caches with old palette values).
 	if (data.type == Type::TestingTheme) {
 		if (!_testingThemeWarning) {
@@ -630,112 +694,13 @@ bool MainWindow::eventFilter(QObject *object, QEvent *e) {
 	return Platform::MainWindow::eventFilter(object, e);
 }
 
-void MainWindow::updateTrayMenu(bool force) {
-	if (!trayIconMenu || (Platform::IsWindows() && !force)) return;
-
-	auto actions = trayIconMenu->actions();
-	if (Platform::IsLinux() && !Platform::IsWayland()) {
-		auto minimizeAction = actions.at(1);
-		minimizeAction->setEnabled(isVisible());
-	} else {
-		updateIsActive();
-		auto active = Platform::IsWayland() ? isVisible() : isActive();
-		auto toggleAction = actions.at(0);
-		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(minimizeToTray()));
-		disconnect(toggleAction, SIGNAL(triggered(bool)), this, SLOT(showFromTray()));
-		connect(toggleAction, SIGNAL(triggered(bool)), this, active ? SLOT(minimizeToTray()) : SLOT(showFromTray()));
-		toggleAction->setText(active
-			? tr::lng_minimize_to_tray(tr::now)
-			: tr::lng_open_from_tray(tr::now));
+void MainWindow::updateTrayMenu() {
+	if (!trayIconMenu) {
+		return;
 	}
-	auto notificationAction = actions.at(Platform::IsLinux() && !Platform::IsWayland() ? 2 : 1);
-	auto notificationActionText = Core::App().settings().desktopNotify()
-		? tr::lng_disable_notifications_from_tray(tr::now)
-		: tr::lng_enable_notifications_from_tray(tr::now);
-	notificationAction->setText(notificationActionText);
+	_updateTrayMenuTextActions.fire({});
 
 	psTrayMenuUpdated();
-}
-
-void MainWindow::onShowAddContact() {
-	if (isHidden()) showFromTray();
-
-	if (const auto controller = sessionController()) {
-		Ui::show(
-			Box<AddContactBox>(&controller->session()),
-			Ui::LayerOption::KeepOther);
-	}
-}
-
-void MainWindow::onShowNewGroup() {
-	if (isHidden()) showFromTray();
-
-	if (const auto controller = sessionController()) {
-		Ui::show(
-			Box<GroupInfoBox>(controller, GroupInfoBox::Type::Group),
-			Ui::LayerOption::KeepOther);
-	}
-}
-
-void MainWindow::onShowNewChannel() {
-	if (isHidden()) showFromTray();
-
-	if (const auto controller = sessionController()) {
-		Ui::show(
-			Box<GroupInfoBox>(controller, GroupInfoBox::Type::Channel),
-			Ui::LayerOption::KeepOther);
-	}
-}
-
-void MainWindow::showLogoutConfirmation() {
-	if (isHidden()) {
-		showFromTray();
-	}
-
-	const auto account = Core::App().passcodeLocked()
-		? nullptr
-		: sessionController()
-		? &sessionController()->session().account()
-		: nullptr;
-	const auto weak = base::make_weak(account);
-	const auto callback = [=] {
-		if (account && !weak) {
-			return;
-		}
-		if (account
-			&& account->sessionExists()
-			&& Core::App().exportManager().inProgress(&account->session())) {
-			Ui::hideLayer();
-			Core::App().exportManager().stopWithConfirmation([=] {
-				Core::App().logout(account);
-			});
-		} else {
-			Core::App().logout(account);
-		}
-	};
-	Ui::show(Box<ConfirmBox>(
-		tr::lng_sure_logout(tr::now),
-		tr::lng_settings_logout(tr::now),
-		st::attentionBoxButton,
-		callback));
-}
-
-void MainWindow::quitFromTray() {
-	App::quit();
-}
-
-void MainWindow::activate() {
-	bool wasHidden = !isVisible();
-	setWindowState(windowState() & ~Qt::WindowMinimized);
-	setVisible(true);
-	psActivateProcess();
-	activateWindow();
-	controller().updateIsActiveFocus();
-	if (wasHidden) {
-		if (_main) {
-			_main->windowShown();
-		}
-	}
 }
 
 bool MainWindow::takeThirdSectionFromLayer() {
@@ -749,36 +714,25 @@ void MainWindow::fixOrder() {
 	if (_testingThemeWarning) _testingThemeWarning->raise();
 }
 
-void MainWindow::showFromTray(QSystemTrayIcon::ActivationReason reason) {
-	if (reason != QSystemTrayIcon::Context) {
-		base::call_delayed(1, this, [this] {
-			updateTrayMenu();
-			updateGlobalMenu();
-		});
-		activate();
-		updateUnreadCounter();
-	}
-}
-
 void MainWindow::handleTrayIconActication(
 		QSystemTrayIcon::ActivationReason reason) {
 	updateIsActive();
 	if (Platform::IsMac() && isActive()) {
 		if (trayIcon && !trayIcon->contextMenu()) {
-			showFromTray(reason);
+			showFromTray();
 		}
 		return;
 	}
 	if (reason == QSystemTrayIcon::Context) {
-		updateTrayMenu(true);
+		updateTrayMenu();
 		base::call_delayed(1, this, [=] {
 			psShowTrayMenu();
 		});
 	} else if (!skipTrayClick()) {
-		if (Platform::IsWayland() ? isVisible() : isActive()) {
+		if (isActiveForTrayMenu()) {
 			minimizeToTray();
 		} else {
-			showFromTray(reason);
+			showFromTray();
 		}
 		_lastTrayClickTime = crl::now();
 	}
@@ -835,13 +789,13 @@ void MainWindow::toggleDisplayNotifyFromTray() {
 	}
 	account().session().saveSettings();
 	using Change = Window::Notifications::ChangeType;
-	auto &changes = Core::App().notifications().settingsChanged();
-	changes.notify(Change::DesktopEnabled);
+	auto &notifications = Core::App().notifications();
+	notifications.notifySettingsChanged(Change::DesktopEnabled);
 	if (soundNotifyChanged) {
-		changes.notify(Change::SoundEnabled);
+		notifications.notifySettingsChanged(Change::SoundEnabled);
 	}
 	if (flashBounceNotifyChanged) {
-		changes.notify(Change::FlashBounceEnabled);
+		notifications.notifySettingsChanged(Change::FlashBounceEnabled);
 	}
 }
 
@@ -1003,7 +957,11 @@ QImage MainWindow::iconWithCounter(int size, int count, style::color bg, style::
 		placeSmallCounter(img, size, count, bg, QPoint(), fg);
 	} else {
 		QPainter p(&img);
-		p.drawPixmap(size / 2, size / 2, App::pixmapFromImageInPlace(iconWithCounter(-size / 2, count, bg, fg, false)));
+		p.drawPixmap(
+			size / 2,
+			size / 2,
+			Ui::PixmapFromImage(
+				iconWithCounter(-size / 2, count, bg, fg, false)));
 	}
 	return img;
 }
@@ -1019,7 +977,7 @@ void MainWindow::sendPaths() {
 	}
 }
 
-void MainWindow::updateIsActiveHook() {
+void MainWindow::activeChangedHook() {
 	if (const auto controller = sessionController()) {
 		controller->session().updates().updateOnline();
 	}

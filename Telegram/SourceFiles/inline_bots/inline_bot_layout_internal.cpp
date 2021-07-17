@@ -14,7 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_photo_media.h"
 #include "data/data_document_media.h"
 #include "data/stickers/data_stickers.h"
-#include "chat_helpers/gifs_list_widget.h" // ChatHelpers::DeleteSavedGif
+#include "chat_helpers/gifs_list_widget.h" // ChatHelpers::AddGifAction.
 #include "chat_helpers/stickers_lottie.h"
 #include "inline_bots/inline_bot_result.h"
 #include "lottie/lottie_single_player.h"
@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/player/media_player_instance.h"
 #include "history/history_location_manager.h"
 #include "history/view/history_view_cursor_state.h"
+#include "history/view/media/history_view_document.h" // DrawThumbnailAsSongCover
 #include "ui/image/image.h"
 #include "ui/text/format_values.h"
 #include "ui/cached_round_corners.h"
@@ -126,7 +127,9 @@ void Gif::setPosition(int32 position) {
 }
 
 void DeleteSavedGifClickHandler::onClickImpl() const {
-	ChatHelpers::DeleteSavedGif(_data);
+	ChatHelpers::AddGifAction(
+		[](QString, Fn<void()> &&done) { done(); },
+		_data);
 }
 
 int Gif::resizeGetHeight(int width) {
@@ -456,7 +459,6 @@ void Sticker::unloadHeavyPart() {
 
 void Sticker::paint(Painter &p, const QRect &clip, const PaintContext *context) const {
 	ensureDataMediaCreated(getShownDocument());
-	bool loaded = _dataMedia->loaded();
 
 	auto over = _a_over.value(_active ? 1. : 0.);
 	if (over > 0) {
@@ -480,6 +482,19 @@ void Sticker::paint(Painter &p, const QRect &clip, const PaintContext *context) 
 		int w = _thumb.width() / cIntRetinaFactor(), h = _thumb.height() / cIntRetinaFactor();
 		QPoint pos = QPoint((st::stickerPanSize.width() - w) / 2, (st::stickerPanSize.height() - h) / 2);
 		p.drawPixmap(pos, _thumb);
+	} else if (context->pathGradient) {
+		const auto thumbSize = getThumbSize();
+		const auto w = thumbSize.width();
+		const auto h = thumbSize.height();
+		ChatHelpers::PaintStickerThumbnailPath(
+			p,
+			_dataMedia.get(),
+			QRect(
+				(st::stickerPanSize.width() - w) / 2,
+				(st::stickerPanSize.height() - h) / 2,
+				w,
+				h),
+			context->pathGradient);
 	}
 }
 
@@ -693,24 +708,23 @@ void Video::initDimensions() {
 	const auto withThumb = withThumbnail();
 
 	_maxw = st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft;
-	int32 textWidth = _maxw - (withThumb ? (st::inlineThumbSize + st::inlineThumbSkip) : 0);
-	TextParseOptions titleOpts = { 0, _maxw, 2 * st::semiboldFont->height, Qt::LayoutDirectionAuto };
+	const auto textWidth = _maxw - (st::inlineThumbSize + st::inlineThumbSkip);
+	TextParseOptions titleOpts = { 0, textWidth, 2 * st::semiboldFont->height, Qt::LayoutDirectionAuto };
 	auto title = TextUtilities::SingleLine(_result->getLayoutTitle());
 	if (title.isEmpty()) {
 		title = tr::lng_media_video(tr::now);
 	}
 	_title.setText(st::semiboldTextStyle, title, titleOpts);
-	int32 titleHeight = qMin(_title.countHeight(_maxw), 2 * st::semiboldFont->height);
+	int32 titleHeight = qMin(_title.countHeight(textWidth), 2 * st::semiboldFont->height);
 
 	int32 descriptionLines = withThumb ? (titleHeight > st::semiboldFont->height ? 1 : 2) : 3;
 
-	TextParseOptions descriptionOpts = { TextParseMultiline, _maxw, descriptionLines * st::normalFont->height, Qt::LayoutDirectionAuto };
+	TextParseOptions descriptionOpts = { TextParseMultiline, textWidth, descriptionLines * st::normalFont->height, Qt::LayoutDirectionAuto };
 	QString description = _result->getLayoutDescription();
 	if (description.isEmpty()) {
 		description = _duration;
 	}
 	_description.setText(st::defaultTextStyle, description, descriptionOpts);
-	int32 descriptionHeight = qMin(_description.countHeight(_maxw), descriptionLines * st::normalFont->height);
 
 	_minh = st::inlineThumbSize;
 	_minh += st::inlineRowMargin * 2 + st::inlineRowBorder;
@@ -809,10 +823,6 @@ void Video::prepareThumbnail(QSize size) const {
 	}
 }
 
-void OpenFileClickHandler::onClickImpl() const {
-	_result->openFile();
-}
-
 void CancelFileClickHandler::onClickImpl() const {
 	_result->cancelFile();
 }
@@ -821,7 +831,6 @@ File::File(not_null<Context*> context, not_null<Result*> result)
 : FileBase(context, result)
 , _title(st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft - st::inlineFileSize - st::inlineThumbSkip)
 , _description(st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft - st::inlineFileSize - st::inlineThumbSkip)
-, _open(std::make_shared<OpenFileClickHandler>(result))
 , _cancel(std::make_shared<CancelFileClickHandler>(result))
 , _document(getShownDocument()) {
 	Expects(getResultDocument() != nullptr);
@@ -836,7 +845,6 @@ File::File(not_null<Context*> context, not_null<Result*> result)
 
 void File::initDimensions() {
 	_maxw = st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft;
-	int textWidth = _maxw - (st::inlineFileSize + st::inlineThumbSkip);
 
 	TextParseOptions titleOpts = { 0, _maxw, st::semiboldFont->height, Qt::LayoutDirectionAuto };
 	_title.setText(st::semiboldTextStyle, TextUtilities::SingleLine(_result->getLayoutTitle()), titleOpts);
@@ -852,7 +860,6 @@ void File::paint(Painter &p, const QRect &clip, const PaintContext *context) con
 	const auto left = st::inlineFileSize + st::inlineThumbSkip;
 
 	ensureDataMediaCreated();
-	const auto loaded = _documentMedia->loaded();
 	const auto displayLoading = _document->displayLoading();
 	if (displayLoading) {
 		ensureAnimation();
@@ -865,16 +872,21 @@ void File::paint(Painter &p, const QRect &clip, const PaintContext *context) con
 
 	auto inner = style::rtlrect(0, st::inlineRowMargin, st::inlineFileSize, st::inlineFileSize, _width);
 	p.setPen(Qt::NoPen);
-	if (isThumbAnimation()) {
-		auto over = _animation->a_thumbOver.value(1.);
-		p.setBrush(anim::brush(st::msgFileInBg, st::msgFileInBgOver, over));
-	} else {
-		bool over = ClickHandler::showAsActive(_document->loading() ? _cancel : _open);
-		p.setBrush(over ? st::msgFileInBgOver : st::msgFileInBg);
-	}
 
-	{
+	const auto coverDrawn = _document->isSongWithCover()
+		&& HistoryView::DrawThumbnailAsSongCover(p, _documentMedia, inner);
+	if (!coverDrawn) {
 		PainterHighQualityEnabler hq(p);
+		if (isThumbAnimation()) {
+			const auto over = _animation->a_thumbOver.value(1.);
+			p.setBrush(
+				anim::brush(st::msgFileInBg, st::msgFileInBgOver, over));
+		} else {
+			const auto over = ClickHandler::showAsActive(_document->loading()
+				? _cancel
+				: _open);
+			p.setBrush(over ? st::msgFileInBgOver : st::msgFileInBg);
+		}
 		p.drawEllipse(inner);
 	}
 
@@ -890,6 +902,8 @@ void File::paint(Painter &p, const QRect &clip, const PaintContext *context) con
 			return &st::historyFileInPause;
 		} else if (_document->isImage()) {
 			return &st::historyFileInImage;
+		} else if (_document->isSongWithCover()) {
+			return &st::historyFileSongPlay;
 		} else if (_document->isVoiceMessage()
 			|| _document->isAudioFile()) {
 			return &st::historyFileInPlay;
@@ -1063,13 +1077,11 @@ Contact::Contact(not_null<Context*> context, not_null<Result*> result)
 void Contact::initDimensions() {
 	_maxw = st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft;
 	int32 textWidth = _maxw - (st::inlineThumbSize + st::inlineThumbSkip);
-	TextParseOptions titleOpts = { 0, _maxw, st::semiboldFont->height, Qt::LayoutDirectionAuto };
+	TextParseOptions titleOpts = { 0, textWidth, st::semiboldFont->height, Qt::LayoutDirectionAuto };
 	_title.setText(st::semiboldTextStyle, TextUtilities::SingleLine(_result->getLayoutTitle()), titleOpts);
-	int32 titleHeight = qMin(_title.countHeight(_maxw), st::semiboldFont->height);
 
-	TextParseOptions descriptionOpts = { TextParseMultiline, _maxw, st::normalFont->height, Qt::LayoutDirectionAuto };
+	TextParseOptions descriptionOpts = { TextParseMultiline, textWidth, st::normalFont->height, Qt::LayoutDirectionAuto };
 	_description.setText(st::defaultTextStyle, _result->getLayoutDescription(), descriptionOpts);
-	int32 descriptionHeight = qMin(_description.countHeight(_maxw), st::normalFont->height);
 
 	_minh = st::inlineFileSize;
 	_minh += st::inlineRowMargin * 2 + st::inlineRowBorder;
@@ -1160,7 +1172,7 @@ Article::Article(
 
 void Article::initDimensions() {
 	_maxw = st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft;
-	int32 textWidth = _maxw - (_withThumb ? (st::inlineThumbSize + st::inlineThumbSkip) : 0);
+	int32 textWidth = _maxw - (_withThumb ? (st::inlineThumbSize + st::inlineThumbSkip) : (st::emojiPanHeaderLeft - st::inlineResultsLeft));
 	TextParseOptions titleOpts = { 0, textWidth, 2 * st::semiboldFont->height, Qt::LayoutDirectionAuto };
 	_title.setText(st::semiboldTextStyle, TextUtilities::SingleLine(_result->getLayoutTitle()), titleOpts);
 	int32 titleHeight = qMin(_title.countHeight(textWidth), 2 * st::semiboldFont->height);
@@ -1182,8 +1194,9 @@ int32 Article::resizeGetHeight(int32 width) {
 	if (_url) {
 		_urlText = getResultUrl();
 		_urlWidth = st::normalFont->width(_urlText);
-		if (_urlWidth > _width - st::inlineThumbSize - st::inlineThumbSkip) {
-			_urlText = st::normalFont->elided(_urlText, _width - st::inlineThumbSize - st::inlineThumbSkip);
+		int32 textWidth = _width - (_withThumb ? (st::inlineThumbSize + st::inlineThumbSkip) : (st::emojiPanHeaderLeft - st::inlineResultsLeft));
+		if (_urlWidth > textWidth) {
+			_urlText = st::normalFont->elided(_urlText, textWidth);
 			_urlWidth = st::normalFont->width(_urlText);
 		}
 	}
@@ -1329,7 +1342,6 @@ void Game::countFrameSize() {
 
 void Game::initDimensions() {
 	_maxw = st::emojiPanWidth - st::emojiScroll.width - st::inlineResultsLeft;
-	int32 textWidth = _maxw - (st::inlineThumbSize + st::inlineThumbSkip);
 	TextParseOptions titleOpts = { 0, _maxw, 2 * st::semiboldFont->height, Qt::LayoutDirectionAuto };
 	_title.setText(st::semiboldTextStyle, TextUtilities::SingleLine(_result->getLayoutTitle()), titleOpts);
 	int32 titleHeight = qMin(_title.countHeight(_maxw), 2 * st::semiboldFont->height);
@@ -1371,7 +1383,7 @@ void Game::paint(Painter &p, const QRect &clip, const PaintContext *context) con
 	if (animatedThumb) {
 		_documentMedia->automaticLoad(fileOrigin(), nullptr);
 
-		bool loaded = _documentMedia->loaded(), loading = document->loading(), displayLoading = document->displayLoading();
+		bool loaded = _documentMedia->loaded(), displayLoading = document->displayLoading();
 		if (loaded && !_gif && !_gif.isBad()) {
 			auto that = const_cast<Game*>(this);
 			that->_gif = Media::Clip::MakeReader(

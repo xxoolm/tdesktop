@@ -20,10 +20,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/toast/toast.h"
 #include "ui/text/text_utilities.h"
 #include "ui/text/text_options.h"
+#include "ui/boxes/calendar_box.h"
 #include "ui/special_buttons.h"
 #include "chat_helpers/emoji_suggestions_widget.h"
 #include "settings/settings_privacy_security.h"
-#include "boxes/calendar_box.h"
 #include "boxes/confirm_box.h"
 #include "boxes/passcode_box.h"
 #include "boxes/peers/edit_peer_permissions_box.h"
@@ -197,42 +197,45 @@ EditAdminBox::EditAdminBox(
 	QWidget*,
 	not_null<PeerData*> peer,
 	not_null<UserData*> user,
-	const MTPChatAdminRights &rights,
+	ChatAdminRightsInfo rights,
 	const QString &rank)
 : EditParticipantBox(
 	nullptr,
 	peer,
 	user,
-	(rights.c_chatAdminRights().vflags().v != 0))
+	(rights.flags != 0))
 , _oldRights(rights)
 , _oldRank(rank) {
 }
 
-MTPChatAdminRights EditAdminBox::Defaults(not_null<PeerData*> peer) {
-	const auto defaultRights = peer->isChat()
-		? ChatData::DefaultAdminRights()
-		: peer->isMegagroup()
-		? (Flag::f_change_info
-			| Flag::f_delete_messages
-			| Flag::f_ban_users
-			| Flag::f_invite_users
-			| Flag::f_pin_messages
-			| Flag::f_manage_call)
-		: (Flag::f_change_info
-			| Flag::f_post_messages
-			| Flag::f_edit_messages
-			| Flag::f_delete_messages
-			| Flag::f_invite_users);
-	return MTP_chatAdminRights(MTP_flags(defaultRights));
+ChatAdminRightsInfo EditAdminBox::defaultRights() const {
+	using Flag = ChatAdminRight;
+
+	return peer()->isChat()
+		? peer()->asChat()->defaultAdminRights(user())
+		: peer()->isMegagroup()
+		? ChatAdminRightsInfo{ (Flag::ChangeInfo
+			| Flag::DeleteMessages
+			| Flag::BanUsers
+			| Flag::InviteUsers
+			| Flag::PinMessages
+			| Flag::ManageCall) }
+		: ChatAdminRightsInfo{ (Flag::ChangeInfo
+			| Flag::PostMessages
+			| Flag::EditMessages
+			| Flag::DeleteMessages
+			| Flag::InviteUsers
+			| Flag::ManageCall) };
 }
 
 void EditAdminBox::prepare() {
 	using namespace rpl::mappers;
+	using Flag = ChatAdminRight;
+	using Flags = ChatAdminRights;
 
 	EditParticipantBox::prepare();
 
-	auto hadRights = _oldRights.c_chatAdminRights().vflags().v;
-	setTitle(hadRights
+	setTitle(_oldRights.flags
 		? tr::lng_rights_edit_admin()
 		: tr::lng_channel_add_admin());
 
@@ -242,16 +245,18 @@ void EditAdminBox::prepare() {
 
 	const auto chat = peer()->asChat();
 	const auto channel = peer()->asChannel();
-	const auto prepareRights = hadRights ? _oldRights : Defaults(peer());
+	const auto prepareRights = _oldRights.flags
+		? _oldRights
+		: defaultRights();
 	const auto disabledByDefaults = (channel && !channel->isMegagroup())
-		? MTPDchatAdminRights::Flags(0)
+		? ChatAdminRights()
 		: DisabledByDefaultRestrictions(peer());
 	const auto filterByMyRights = canSave()
-		&& !hadRights
+		&& !_oldRights.flags
 		&& channel
 		&& !channel->amCreator();
 	const auto prepareFlags = disabledByDefaults
-		| (prepareRights.c_chatAdminRights().vflags().v
+		| (prepareRights.flags
 			& (filterByMyRights ? channel->adminRights() : ~Flag(0)));
 
 	const auto disabledMessages = [&] {
@@ -264,12 +269,12 @@ void EditAdminBox::prepare() {
 			result.emplace(
 				disabledByDefaults,
 				tr::lng_rights_permission_for_all(tr::now));
-			if (const auto channel = peer()->asChannel()) {
-				if (amCreator() && user()->isSelf()) {
-					result.emplace(
-						~Flag::f_anonymous,
-						tr::lng_rights_permission_cant_edit(tr::now));
-				} else if (!channel->amCreator()) {
+			if (amCreator() && user()->isSelf()) {
+				result.emplace(
+					~Flag::Anonymous,
+					tr::lng_rights_permission_cant_edit(tr::now));
+			} else if (const auto channel = peer()->asChannel()) {
+				if (!channel->amCreator()) {
 					result.emplace(
 						~channel->adminRights(),
 						tr::lng_rights_permission_cant_edit(tr::now));
@@ -303,7 +308,7 @@ void EditAdminBox::prepare() {
 	rpl::duplicate(
 		selectedFlags
 	) | rpl::map(
-		(_1 & Flag::f_add_admins) != 0
+		(_1 & Flag::AddAdmins) != 0
 	) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](bool checked) {
 		refreshAboutAddAdminsText(checked);
@@ -329,13 +334,13 @@ void EditAdminBox::prepare() {
 			if (!_saveCallback) {
 				return;
 			}
-			const auto newFlags = value()
+			const auto newFlags = (value() | ChatAdminRight::Other)
 				& ((!channel || channel->amCreator())
 					? ~Flags(0)
 					: channel->adminRights());
 			_saveCallback(
 				_oldRights,
-				MTP_chatAdminRights(MTP_flags(newFlags)),
+				ChatAdminRightsInfo(newFlags),
 				rank ? rank->getLastText().trimmed() : QString());
 		});
 		addButton(tr::lng_cancel(), [=] { closeBox(); });
@@ -444,7 +449,7 @@ void EditAdminBox::transferOwnership() {
 		channel,
 		MTP_inputUserEmpty(),
 		MTP_inputCheckPasswordEmpty()
-	)).fail([=](const RPCError &error) {
+	)).fail([=](const MTP::Error &error) {
 		_checkTransferRequestId = 0;
 		if (!handleTransferPasswordError(error)) {
 			getDelegate()->show(Box<ConfirmBox>(
@@ -461,7 +466,7 @@ void EditAdminBox::transferOwnership() {
 	}).send();
 }
 
-bool EditAdminBox::handleTransferPasswordError(const RPCError &error) {
+bool EditAdminBox::handleTransferPasswordError(const MTP::Error &error) {
 	const auto session = &user()->session();
 	auto about = tr::lng_rights_transfer_check_about(
 		tr::now,
@@ -533,7 +538,7 @@ void EditAdminBox::sendTransferRequestFrom(
 				lt_user,
 				user->shortName()));
 		Ui::hideLayer();
-	}).fail(crl::guard(this, [=](const RPCError &error) {
+	}).fail(crl::guard(this, [=](const MTP::Error &error) {
 		if (weak) {
 			_transferRequestId = 0;
 		}
@@ -592,12 +597,15 @@ EditRestrictedBox::EditRestrictedBox(
 	not_null<PeerData*> peer,
 	not_null<UserData*> user,
 	bool hasAdminRights,
-	const MTPChatBannedRights &rights)
+	ChatRestrictionsInfo rights)
 : EditParticipantBox(nullptr, peer, user, hasAdminRights)
 , _oldRights(rights) {
 }
 
 void EditRestrictedBox::prepare() {
+	using Flag = ChatRestriction;
+	using Flags = ChatRestrictions;
+
 	EditParticipantBox::prepare();
 
 	setTitle(tr::lng_rights_user_restrictions());
@@ -611,14 +619,14 @@ void EditRestrictedBox::prepare() {
 	const auto defaultRestrictions = chat
 		? chat->defaultRestrictions()
 		: channel->defaultRestrictions();
-	const auto prepareRights = (_oldRights.c_chatBannedRights().vflags().v
+	const auto prepareRights = _oldRights.flags
 		? _oldRights
-		: Defaults(peer()));
+		: defaultRights();
 	const auto prepareFlags = FixDependentRestrictions(
-		prepareRights.c_chatBannedRights().vflags().v
+		prepareRights.flags
 		| defaultRestrictions
 		| ((channel && channel->isPublic())
-			? (Flag::f_change_info | Flag::f_pin_messages)
+			? (Flag::ChangeInfo | Flag::PinMessages)
 			: Flags(0)));
 	const auto disabledMessages = [&] {
 		auto result = std::map<Flags, QString>();
@@ -630,7 +638,7 @@ void EditRestrictedBox::prepare() {
 			const auto disabled = FixDependentRestrictions(
 				defaultRestrictions
 				| ((channel && channel->isPublic())
-					? (Flag::f_change_info | Flag::f_pin_messages)
+					? (Flag::ChangeInfo | Flag::PinMessages)
 					: Flags(0)));
 			result.emplace(
 				disabled,
@@ -646,7 +654,7 @@ void EditRestrictedBox::prepare() {
 		disabledMessages);
 	addControl(std::move(checkboxes), QMargins());
 
-	_until = prepareRights.c_chatBannedRights().vuntil_date().v;
+	_until = prepareRights.until;
 	addControl(object_ptr<Ui::BoxContentDivider>(this), st::rightsUntilMargin);
 	addControl(
 		object_ptr<Ui::FlatLabel>(
@@ -669,9 +677,7 @@ void EditRestrictedBox::prepare() {
 			}
 			_saveCallback(
 				_oldRights,
-				MTP_chatBannedRights(
-					MTP_flags(value()),
-					MTP_int(getRealUntilValue())));
+				ChatRestrictionsInfo{ value(), getRealUntilValue() });
 		};
 		addButton(tr::lng_settings_save(), save);
 		addButton(tr::lng_cancel(), [=] { closeBox(); });
@@ -680,8 +686,8 @@ void EditRestrictedBox::prepare() {
 	}
 }
 
-MTPChatBannedRights EditRestrictedBox::Defaults(not_null<PeerData*> peer) {
-	return MTP_chatBannedRights(MTP_flags(0), MTP_int(0));
+ChatRestrictionsInfo EditRestrictedBox::defaultRights() const {
+	return ChatRestrictionsInfo();
 }
 
 void EditRestrictedBox::showRestrictUntil() {
@@ -691,7 +697,7 @@ void EditRestrictedBox::showRestrictUntil() {
 		: base::unixtime::parse(getRealUntilValue()).date();
 	auto month = highlighted;
 	_restrictUntilBox = Ui::show(
-		Box<CalendarBox>(
+		Box<Ui::CalendarBox>(
 			month,
 			highlighted,
 			[this](const QDate &date) {
@@ -766,7 +772,7 @@ void EditRestrictedBox::createUntilVariants() {
 		}
 	};
 	auto addCurrentVariant = [&](TimeId from, TimeId to) {
-		auto oldUntil = _oldRights.c_chatBannedRights().vuntil_date().v;
+		auto oldUntil = _oldRights.until;
 		if (oldUntil < _until) {
 			addCustomVariant(oldUntil, from, to);
 		}

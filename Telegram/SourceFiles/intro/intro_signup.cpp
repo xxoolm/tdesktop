@@ -9,7 +9,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "intro/intro_widget.h"
 #include "core/file_utilities.h"
-#include "boxes/photo_crop_box.h"
 #include "boxes/confirm_box.h"
 #include "lang/lang_keys.h"
 #include "ui/widgets/buttons.h"
@@ -29,6 +28,7 @@ SignupWidget::SignupWidget(
 : Step(parent, account, data)
 , _photo(
 	this,
+	data->controller,
 	tr::lng_settings_crop_profile(tr::now),
 	Ui::UserpicButton::Role::ChangePhoto,
 	st::defaultUserpicButton)
@@ -117,8 +117,8 @@ void SignupWidget::nameSubmitDone(const MTPauth_Authorization &result) {
 	finish(d.vuser(), _photo->takeResultImage());
 }
 
-void SignupWidget::nameSubmitFail(const RPCError &error) {
-	if (MTP::isFloodError(error)) {
+void SignupWidget::nameSubmitFail(const MTP::Error &error) {
+	if (MTP::IsFloodError(error)) {
 		showError(tr::lng_flood_error());
 		if (_invertOrder) {
 			_first->setFocus();
@@ -192,7 +192,7 @@ void SignupWidget::submit() {
 			MTP_string(_lastName)
 		)).done([=](const MTPauth_Authorization &result) {
 			nameSubmitDone(result);
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			nameSubmitFail(error);
 		}).handleFloodErrors().send();
 	};

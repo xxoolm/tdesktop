@@ -33,6 +33,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_streaming.h"
 #include "data/data_document.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
 #include "data/data_document_media.h"
 #include "layout.h" // FullSelection
@@ -155,11 +156,11 @@ QSize Gif::countOptimalSize() {
 	_thumbh = th;
 	auto maxWidth = qMax(tw, st::minPhotoSize);
 	auto minHeight = qMax(th, st::minPhotoSize);
-	accumulate_max(maxWidth, _parent->minWidthForMedia());
 	if (!activeCurrentStreamed()) {
 		accumulate_max(maxWidth, gifMaxStatusWidth(_data) + 2 * (st::msgDateImgDelta + st::msgDateImgPadding.x()));
 	}
 	if (_parent->hasBubble()) {
+		accumulate_max(maxWidth, _parent->minWidthForMedia());
 		if (!_caption.isEmpty()) {
 			auto captionw = maxWidth - st::msgPadding.left() - st::msgPadding.right();
 			minHeight += st::mediaCaptionSkip + _caption.countHeight(captionw);
@@ -212,11 +213,11 @@ QSize Gif::countCurrentSize(int newWidth) {
 
 	newWidth = qMax(tw, st::minPhotoSize);
 	auto newHeight = qMax(th, st::minPhotoSize);
-	accumulate_max(newWidth, _parent->minWidthForMedia());
 	if (!activeCurrentStreamed()) {
 		accumulate_max(newWidth, gifMaxStatusWidth(_data) + 2 * (st::msgDateImgDelta + st::msgDateImgPadding.x()));
 	}
 	if (_parent->hasBubble()) {
+		accumulate_max(newWidth, _parent->minWidthForMedia());
 		if (!_caption.isEmpty()) {
 			auto captionw = newWidth - st::msgPadding.left() - st::msgPadding.right();
 			newHeight += st::mediaCaptionSkip + _caption.countHeight(captionw);
@@ -389,7 +390,8 @@ void Gif::draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms
 			}
 			p.drawImage(rthumb, activeOwnPlaying->frozenFrame);
 		} else {
-			if (activeOwnPlaying) {
+			if (activeOwnPlaying
+				&& !activeOwnPlaying->frozenFrame.isNull()) {
 				activeOwnPlaying->frozenFrame = QImage();
 				activeOwnPlaying->frozenStatusText = QString();
 			}
@@ -713,7 +715,6 @@ TextState Gif::cornerStatusTextState(
 		return result;
 	}
 	const auto padding = st::msgDateImgPadding;
-	const auto addWidth = st::historyVideoDownloadSize + 2 * padding.y() - padding.x();
 	const auto statusX = position.x() + st::msgDateImgDelta + padding.x();
 	const auto statusY = position.y() + st::msgDateImgDelta + padding.y();
 	const auto inner = QRect(statusX + padding.y() - padding.x(), statusY, st::historyVideoDownloadSize, st::historyVideoDownloadSize);
@@ -901,6 +902,7 @@ void Gif::drawGrouped(
 		const QRect &geometry,
 		RectParts sides,
 		RectParts corners,
+		float64 highlightOpacity,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const {
 	ensureDataMediaCreated();
@@ -925,9 +927,6 @@ void Gif::drawGrouped(
 	const auto streamingMode = _streamed || autoplay;
 	const auto activeOwnPlaying = activeOwnStreamed();
 
-	auto paintx = geometry.x(), painty = geometry.y(), paintw = geometry.width(), painth = geometry.height();
-
-	auto displayMute = false;
 	const auto streamed = activeOwnPlaying
 		? &activeOwnPlaying->instance
 		: nullptr;
@@ -989,8 +988,16 @@ void Gif::drawGrouped(
 		p.drawPixmap(geometry, *cache);
 	}
 
-	if (selected) {
+	const auto overlayOpacity = selected
+		? (1. - highlightOpacity)
+		: highlightOpacity;
+	if (overlayOpacity > 0.) {
+		p.setOpacity(overlayOpacity);
 		Ui::FillComplexOverlayRect(p, geometry, roundRadius, corners);
+		if (!selected) {
+			Ui::FillComplexOverlayRect(p, geometry, roundRadius, corners);
+		}
+		p.setOpacity(1.);
 	}
 
 	if (radial
@@ -1246,9 +1253,7 @@ void Gif::setStatusSize(int newSize) const {
 
 void Gif::updateStatusText() const {
 	ensureDataMediaCreated();
-	auto showPause = false;
 	auto statusSize = 0;
-	auto realDuration = 0;
 	if (_data->status == FileDownloadFailed || _data->status == FileUploadFailed) {
 		statusSize = Ui::FileStatusSizeFailed;
 	} else if (_data->uploading()) {
@@ -1377,7 +1382,10 @@ void Gif::playAnimation(bool autoplay) {
 		return;
 	} else if ((_streamed && autoplayEnabled())
 		|| (!autoplay && _data->isVideoFile())) {
-		Core::App().showDocument(_data, _parent->data());
+		_parent->delegate()->elementOpenDocument(
+			_data,
+			_parent->data()->fullId(),
+			true);
 		return;
 	}
 	if (_streamed) {

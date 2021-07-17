@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "boxes/peer_list_controllers.h"
 
+#include "base/openssl_help.h"
 #include "boxes/confirm_box.h"
 #include "ui/widgets/checkbox.h"
 #include "ui/ui_utility.h"
@@ -23,7 +24,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "history/history.h"
 #include "dialogs/dialogs_main_list.h"
-#include "window/window_session_controller.h" // onShowAddContact()
+#include "window/window_session_controller.h" // showAddContact()
 #include "facades.h"
 #include "styles/style_boxes.h"
 #include "styles/style_profile.h"
@@ -35,7 +36,7 @@ void ShareBotGame(not_null<UserData*> bot, not_null<PeerData*> chat) {
 	auto &histories = history->owner().histories();
 	const auto requestType = Data::Histories::RequestType::Send;
 	histories.sendRequest(history, requestType, [=](Fn<void()> finish) {
-		const auto randomId = rand_value<uint64>();
+		const auto randomId = openssl::RandomValue<uint64>();
 		const auto api = &chat->session().api();
 		history->sendRequestId = api->request(MTPmessages_SendMedia(
 			MTP_flags(0),
@@ -53,7 +54,7 @@ void ShareBotGame(not_null<UserData*> bot, not_null<PeerData*> chat) {
 		)).done([=](const MTPUpdates &result) {
 			api->applyUpdates(result, randomId);
 			finish();
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			api->sendMessageFail(error, chat);
 			finish();
 		}).afterRequest(
@@ -112,7 +113,7 @@ object_ptr<Ui::BoxContent> PrepareContactsBox(
 		box->addButton(tr::lng_close(), [=] { box->closeBox(); });
 		box->addLeftButton(
 			tr::lng_profile_add_contact(),
-			[=] { controller->widget()->onShowAddContact(); });
+			[=] { controller->showAddContact(); });
 	};
 	return Box<PeerListBox>(
 		std::make_unique<ContactsBoxController>(
@@ -194,7 +195,7 @@ void PeerListGlobalSearchController::searchOnServer() {
 		MTP_int(SearchPeopleLimit)
 	)).done([=](const MTPcontacts_Found &result, mtpRequestId requestId) {
 		searchDone(result, requestId);
-	}).fail([=](const RPCError &error, mtpRequestId requestId) {
+	}).fail([=](const MTP::Error &error, mtpRequestId requestId) {
 		if (_requestId == requestId) {
 			_requestId = 0;
 			delegate()->peerListSearchRefreshRows();
@@ -343,7 +344,7 @@ std::unique_ptr<PeerListRow> ChatsListBoxController::createSearchRow(not_null<Pe
 }
 
 bool ChatsListBoxController::appendRow(not_null<History*> history) {
-	if (auto row = delegate()->peerListFindRow(history->peer->id)) {
+	if (auto row = delegate()->peerListFindRow(history->peer->id.value)) {
 		updateRowHook(static_cast<Row*>(row));
 		return false;
 	}
@@ -425,7 +426,7 @@ void ContactsBoxController::rowClicked(not_null<PeerListRow*> row) {
 }
 
 bool ContactsBoxController::appendRow(not_null<UserData*> user) {
-	if (auto row = delegate()->peerListFindRow(user->id)) {
+	if (auto row = delegate()->peerListFindRow(user->id.value)) {
 		updateRowHook(row);
 		return false;
 	}
@@ -515,7 +516,7 @@ bool AddBotToGroupBoxController::needToCreateRow(
 		not_null<PeerData*> peer) const {
 	if (sharingBotGame()) {
 		if (!peer->canWrite()
-			|| peer->amRestricted(ChatRestriction::f_send_games)) {
+			|| peer->amRestricted(ChatRestriction::SendGames)) {
 			return false;
 		}
 		return true;

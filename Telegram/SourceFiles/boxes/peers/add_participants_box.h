@@ -10,6 +10,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/peer_list_controllers.h"
 #include "boxes/peers/edit_participants_box.h"
 
+struct ChatAdminRightsInfo;
+struct ChatRestrictionsInfo;
+
 namespace Window {
 class SessionNavigation;
 } // namespace Window
@@ -44,6 +47,7 @@ protected:
 	void prepareViewHook() override;
 	std::unique_ptr<PeerListRow> createRow(
 		not_null<UserData*> user) override;
+	virtual bool needsInviteLinkButton();
 
 private:
 	static void Start(
@@ -52,6 +56,7 @@ private:
 		base::flat_set<not_null<UserData*>> &&alreadyIn,
 		bool justCreated);
 
+	void addInviteLinkButton();
 	bool inviteSelectedUsers(not_null<PeerListBox*> box) const;
 	void subscribeToMigration();
 	int alreadyInCount() const;
@@ -68,18 +73,17 @@ private:
 // with search + contacts search + global search.
 class AddSpecialBoxController
 	: public PeerListController
-	, private base::Subscriber
 	, public base::has_weak_ptr {
 public:
 	using Role = ParticipantsBoxController::Role;
 
 	using AdminDoneCallback = Fn<void(
 		not_null<UserData*> user,
-		const MTPChatAdminRights &adminRights,
+		ChatAdminRightsInfo adminRights,
 		const QString &rank)>;
 	using BannedDoneCallback = Fn<void(
-		not_null<UserData*> user,
-		const MTPChatBannedRights &bannedRights)>;
+		not_null<PeerData*> participant,
+		ChatRestrictionsInfo bannedRights)>;
 	AddSpecialBoxController(
 		not_null<PeerData*> peer,
 		Role role,
@@ -99,7 +103,7 @@ public:
 
 private:
 	template <typename Callback>
-	bool checkInfoLoaded(not_null<UserData*> user, Callback callback);
+	bool checkInfoLoaded(not_null<PeerData*> participant, Callback callback);
 
 	void prepareChatRows(not_null<ChatData*> chat);
 	void rebuildChatRows(not_null<ChatData*> chat);
@@ -107,19 +111,20 @@ private:
 	void showAdmin(not_null<UserData*> user, bool sure = false);
 	void editAdminDone(
 		not_null<UserData*> user,
-		const MTPChatAdminRights &rights,
+		ChatAdminRightsInfo rights,
 		const QString &rank);
 	void showRestricted(not_null<UserData*> user, bool sure = false);
 	void editRestrictedDone(
-		not_null<UserData*> user,
-		const MTPChatBannedRights &rights);
-	void kickUser(not_null<UserData*> user, bool sure = false);
-	bool appendRow(not_null<UserData*> user);
+		not_null<PeerData*> participant,
+		ChatRestrictionsInfo rights);
+	void kickUser(not_null<PeerData*> participant, bool sure = false);
+	bool appendRow(not_null<PeerData*> participant);
 	bool prependRow(not_null<UserData*> user);
-	std::unique_ptr<PeerListRow> createRow(not_null<UserData*> user) const;
+	std::unique_ptr<PeerListRow> createRow(
+		not_null<PeerData*> participant) const;
 
 	void subscribeToMigration();
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 
 	not_null<PeerData*> _peer;
 	MTP::Sender _api;
@@ -140,9 +145,7 @@ protected:
 };
 
 // Finds chat/channel members, then contacts, then global search results.
-class AddSpecialBoxSearchController
-	: public PeerListSearchController
-	, private base::Subscriber {
+class AddSpecialBoxSearchController : public PeerListSearchController {
 public:
 	using Role = ParticipantsBoxController::Role;
 

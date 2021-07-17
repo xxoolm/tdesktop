@@ -15,10 +15,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/emoji_config.h"
+#include "ui/ui_utility.h"
 #include "core/application.h"
 #include "main/main_account.h"
 #include "mainwidget.h"
-#include "app.h"
 #include "storage/storage_cloud_blob.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
@@ -246,7 +246,7 @@ void Row::paintPreview(Painter &p) const {
 	const auto y = st::manageEmojiPreviewPadding.top();
 	const auto width = st::manageEmojiPreviewWidth;
 	const auto height = st::manageEmojiPreviewWidth;
-	auto &&preview = ranges::view::zip(_preview, ranges::view::ints(0, int(_preview.size())));
+	auto &&preview = ranges::views::zip(_preview, ranges::views::ints(0, int(_preview.size())));
 	for (const auto &[pixmap, index] : preview) {
 		const auto row = (index / 2);
 		const auto column = (index % 2);
@@ -454,9 +454,9 @@ void Row::setupPreview(const Set &set) {
 	const auto size = st::manageEmojiPreview * cIntRetinaFactor();
 	const auto original = QImage(set.previewPath);
 	const auto full = original.height();
-	auto &&preview = ranges::view::zip(_preview, ranges::view::ints(0, int(_preview.size())));
+	auto &&preview = ranges::views::zip(_preview, ranges::views::ints(0, int(_preview.size())));
 	for (auto &&[pixmap, index] : preview) {
-		pixmap = App::pixmapFromImageInPlace(original.copy(
+		pixmap = Ui::PixmapFromImage(original.copy(
 			{ full * index, 0, full, full }
 		).scaledToWidth(size, Qt::SmoothTransformation));
 		pixmap.setDevicePixelRatio(cRetinaFactor());

@@ -17,6 +17,81 @@ class UserData;
 class ChatData;
 class ChannelData;
 
+enum class ChatAdminRight {
+	ChangeInfo = (1 << 0),
+	PostMessages = (1 << 1),
+	EditMessages = (1 << 2),
+	DeleteMessages = (1 << 3),
+	BanUsers = (1 << 4),
+	InviteUsers = (1 << 5),
+	PinMessages = (1 << 7),
+	AddAdmins = (1 << 9),
+	Anonymous = (1 << 10),
+	ManageCall = (1 << 11),
+	Other = (1 << 12),
+};
+inline constexpr bool is_flag_type(ChatAdminRight) { return true; }
+using ChatAdminRights = base::flags<ChatAdminRight>;
+
+enum class ChatRestriction {
+	ViewMessages = (1 << 0),
+	SendMessages = (1 << 1),
+	SendMedia = (1 << 2),
+	SendStickers = (1 << 3),
+	SendGifs = (1 << 4),
+	SendGames = (1 << 5),
+	SendInline = (1 << 6),
+	EmbedLinks = (1 << 7),
+	SendPolls = (1 << 8),
+	ChangeInfo = (1 << 10),
+	InviteUsers = (1 << 15),
+	PinMessages = (1 << 17),
+};
+inline constexpr bool is_flag_type(ChatRestriction) { return true; }
+using ChatRestrictions = base::flags<ChatRestriction>;
+
+namespace Data {
+
+[[nodiscard]] ChatAdminRights ChatAdminRightsFlags(
+	const MTPChatAdminRights &rights);
+[[nodiscard]] ChatRestrictions ChatBannedRightsFlags(
+	const MTPChatBannedRights &rights);
+[[nodiscard]] TimeId ChatBannedRightsUntilDate(
+	const MTPChatBannedRights &rights);
+
+} // namespace Data
+
+struct ChatAdminRightsInfo {
+	ChatAdminRightsInfo() = default;
+	explicit ChatAdminRightsInfo(ChatAdminRights flags) : flags(flags) {
+	}
+	explicit ChatAdminRightsInfo(const MTPChatAdminRights &rights)
+	: flags(Data::ChatAdminRightsFlags(rights)) {
+	}
+
+	ChatAdminRights flags;
+};
+
+struct ChatRestrictionsInfo {
+	ChatRestrictionsInfo() = default;
+	ChatRestrictionsInfo(ChatRestrictions flags, TimeId until)
+	: flags(flags)
+	, until(until) {
+	}
+	explicit ChatRestrictionsInfo(const MTPChatBannedRights &rights)
+	: flags(Data::ChatBannedRightsFlags(rights))
+	, until(Data::ChatBannedRightsUntilDate(rights)) {
+	}
+
+	ChatRestrictions flags;
+	TimeId until = 0;
+};
+
+struct BotCommand {
+	QString command;
+	QString description;
+};
+
 namespace Ui {
 class EmptyUserpic;
 } // namespace Ui
@@ -30,22 +105,12 @@ namespace Data {
 
 class Session;
 class GroupCall;
+class CloudImageView;
 
 int PeerColorIndex(PeerId peerId);
-int PeerColorIndex(int32 bareId);
+int PeerColorIndex(BareId bareId);
 style::color PeerUserpicColor(PeerId peerId);
 PeerId FakePeerIdForJustName(const QString &name);
-
-} // namespace Data
-
-using ChatAdminRight = MTPDchatAdminRights::Flag;
-using ChatRestriction = MTPDchatBannedRights::Flag;
-using ChatAdminRights = MTPDchatAdminRights::Flags;
-using ChatRestrictions = MTPDchatBannedRights::Flags;
-
-namespace Data {
-
-class CloudImageView;
 
 class RestrictionCheckResult {
 public:
@@ -100,6 +165,17 @@ struct UnavailableReason {
 	}
 };
 
+bool UpdateBotCommands(
+	std::vector<BotCommand> &commands,
+	const MTPVector<MTPBotCommand> &data);
+bool UpdateBotCommands(
+	base::flat_map<UserId, std::vector<BotCommand>> &commands,
+	UserId botId,
+	const MTPVector<MTPBotCommand> &data);
+bool UpdateBotCommands(
+	base::flat_map<UserId, std::vector<BotCommand>> &commands,
+	const MTPVector<MTPBotInfo> &data);
+
 } // namespace Data
 
 class PeerClickHandler : public ClickHandler {
@@ -116,25 +192,26 @@ private:
 
 };
 
-class PeerData {
-private:
-	static constexpr auto kSettingsUnknown = MTPDpeerSettings::Flag(1U << 9);
+enum class PeerSetting {
+	ReportSpam = (1 << 0),
+	AddContact = (1 << 1),
+	BlockContact = (1 << 2),
+	ShareContact = (1 << 3),
+	NeedContactsException = (1 << 4),
+	AutoArchived = (1 << 5),
+	Unknown = (1 << 6),
+};
+inline constexpr bool is_flag_type(PeerSetting) { return true; };
+using PeerSettings = base::flags<PeerSetting>;
 
+class PeerData {
 protected:
 	PeerData(not_null<Data::Session*> owner, PeerId id);
 	PeerData(const PeerData &other) = delete;
 	PeerData &operator=(const PeerData &other) = delete;
 
 public:
-	static constexpr auto kEssentialSettings = 0
-		| MTPDpeerSettings::Flag::f_report_spam
-		| MTPDpeerSettings::Flag::f_add_contact
-		| MTPDpeerSettings::Flag::f_block_contact
-		| MTPDpeerSettings::Flag::f_share_contact
-		| kSettingsUnknown;
-	using Settings = Data::Flags<
-		MTPDpeerSettings::Flags,
-		kEssentialSettings.value()>;
+	using Settings = Data::Flags<PeerSettings>;
 
 	virtual ~PeerData();
 
@@ -158,8 +235,10 @@ public:
 	}
 	[[nodiscard]] bool isVerified() const;
 	[[nodiscard]] bool isScam() const;
+	[[nodiscard]] bool isFake() const;
 	[[nodiscard]] bool isMegagroup() const;
 	[[nodiscard]] bool isBroadcast() const;
+	[[nodiscard]] bool isGigagroup() const;
 	[[nodiscard]] bool isRepliesChat() const;
 	[[nodiscard]] bool sharedMediaInfo() const {
 		return isSelf() || isRepliesChat();
@@ -170,7 +249,7 @@ public:
 			|| (id == kServiceNotificationsId);
 	}
 	[[nodiscard]] bool isServiceUser() const {
-		return isUser() && !(id % 1000);
+		return isUser() && !(id.value % 1000);
 	}
 
 	[[nodiscard]] std::optional<TimeId> notifyMuteUntil() const {
@@ -237,10 +316,6 @@ public:
 	[[nodiscard]] const Ui::Text::String &topBarNameText() const;
 	[[nodiscard]] QString userName() const;
 
-	[[nodiscard]] int32 bareId() const {
-		return int32(uint32(id & 0xFFFFFFFFULL));
-	}
-
 	[[nodiscard]] const base::flat_set<QString> &nameWords() const {
 		return _nameWords;
 	}
@@ -302,6 +377,8 @@ public:
 	[[nodiscard]] ImageLocation userpicLocation() const {
 		return _userpic.location();
 	}
+
+	static constexpr auto kUnknownPhotoId = PhotoId(0xFFFFFFFFFFFFFFFFULL);
 	[[nodiscard]] bool userpicPhotoUnknown() const {
 		return (_userpicPhotoId == kUnknownPhotoId);
 	}
@@ -342,19 +419,21 @@ public:
 
 	void checkFolder(FolderId folderId);
 
-	void setSettings(MTPDpeerSettings::Flags which) {
+	void setSettings(PeerSettings which) {
 		_settings.set(which);
 	}
 	auto settings() const {
-		return (_settings.current() & kSettingsUnknown)
+		return (_settings.current() & PeerSetting::Unknown)
 			? std::nullopt
 			: std::make_optional(_settings.current());
 	}
 	auto settingsValue() const {
-		return (_settings.current() & kSettingsUnknown)
+		return (_settings.current() & PeerSetting::Unknown)
 			? _settings.changes()
 			: (_settings.value() | rpl::type_erased());
 	}
+
+	void setSettings(const MTPPeerSettings &data);
 
 	enum class BlockStatus : char {
 		Unknown,
@@ -385,7 +464,11 @@ public:
 	}
 	void setLoadedStatus(LoadedStatus status);
 
+	[[nodiscard]] TimeId messagesTTL() const;
+	void setMessagesTTL(TimeId period);
+
 	[[nodiscard]] Data::GroupCall *groupCall() const;
+	[[nodiscard]] PeerId groupCallDefaultJoinAs() const;
 
 	const PeerId id;
 	QString name;
@@ -398,10 +481,7 @@ protected:
 		const QString &newName,
 		const QString &newNameOrPhone,
 		const QString &newUsername);
-	void updateUserpic(
-		PhotoId photoId,
-		MTP::DcId dcId,
-		const MTPFileLocation &small);
+	void updateUserpic(PhotoId photoId, MTP::DcId dcId);
 	void clearUserpic();
 
 private:
@@ -411,8 +491,6 @@ private:
 		-> const std::vector<Data::UnavailableReason> &;
 
 	void setUserpicChecked(PhotoId photoId, const ImageLocation &location);
-
-	static constexpr auto kUnknownPhotoId = PhotoId(0xFFFFFFFFFFFFFFFFULL);
 
 	const not_null<Data::Session*> _owner;
 
@@ -428,9 +506,11 @@ private:
 	base::flat_set<QChar> _nameFirstLetters;
 
 	crl::time _lastFullUpdate = 0;
+
+	TimeId _ttlPeriod = 0;
 	bool _hasPinnedMessages = false;
 
-	Settings _settings = { kSettingsUnknown };
+	Settings _settings = PeerSettings(PeerSetting::Unknown);
 	BlockStatus _blockStatus = BlockStatus::Unknown;
 	LoadedStatus _loadedStatus = LoadedStatus::Not;
 

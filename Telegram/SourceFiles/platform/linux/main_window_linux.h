@@ -8,20 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "platform/platform_main_window.h"
+#include "base/unique_qptr.h"
 
-#include "ui/widgets/popup_menu.h"
-
-#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-#include "statusnotifieritem.h"
-#include <QtCore/QTemporaryFile>
-#include <QtDBus/QDBusObjectPath>
-#include <dbusmenuexporter.h>
-
-typedef void* gpointer;
-typedef char gchar;
-typedef struct _GVariant GVariant;
-typedef struct _GDBusProxy GDBusProxy;
-#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+namespace Ui {
+class PopupMenu;
+} // namespace Ui
 
 namespace Platform {
 
@@ -42,7 +33,7 @@ public:
 		return _sniAvailable || QSystemTrayIcon::isSystemTrayAvailable();
 	}
 
-	static void LibsLoaded();
+	bool isActiveForTrayMenu() override;
 
 	~MainWindow();
 
@@ -50,12 +41,11 @@ protected:
 	void initHook() override;
 	void unreadCounterChangedHook() override;
 	void updateGlobalMenuHook() override;
-	void handleVisibleChangedHook(bool visible) override;
 
 	void initTrayMenuHook() override;
 	bool hasTrayIcon() const override;
 
-	void workmodeUpdated(DBIWorkMode mode) override;
+	void workmodeUpdated(Core::Settings::WorkMode mode) override;
 	void createGlobalMenu() override;
 
 	QSystemTrayIcon *trayIcon = nullptr;
@@ -73,20 +63,12 @@ protected:
 		style::color color) = 0;
 
 private:
+	class Private;
+	friend class Private;
+	const std::unique_ptr<Private> _private;
+
 	bool _sniAvailable = false;
-	Ui::PopupMenu *_trayIconMenuXEmbed = nullptr;
-
-	void updateIconCounters();
-	void updateWaylandDecorationColors();
-
-#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-	StatusNotifierItem *_sniTrayIcon = nullptr;
-	GDBusProxy *_sniDBusProxy = nullptr;
-	std::unique_ptr<QTemporaryFile> _trayIconFile = nullptr;
-
-	bool _appMenuSupported = false;
-	DBusMenuExporter *_mainMenuExporter = nullptr;
-	QDBusObjectPath _mainMenuPath;
+	base::unique_qptr<Ui::PopupMenu> _trayIconMenuXEmbed;
 
 	QMenu *psMainMenu = nullptr;
 	QAction *psLogout = nullptr;
@@ -109,19 +91,8 @@ private:
 	QAction *psMonospace = nullptr;
 	QAction *psClearFormat = nullptr;
 
-	void setSNITrayIcon(int counter, bool muted);
-	void attachToSNITrayIcon();
-	void handleSNIHostRegistered();
-
-	void handleSNIOwnerChanged(
-		const QString &service,
-		const QString &oldOwner,
-		const QString &newOwner);
-
-	void handleAppMenuOwnerChanged(
-		const QString &service,
-		const QString &oldOwner,
-		const QString &newOwner);
+	void updateIconCounters();
+	void handleNativeSurfaceChanged(bool exist);
 
 	void psLinuxUndo();
 	void psLinuxRedo();
@@ -137,14 +108,6 @@ private:
 	void psLinuxStrikeOut();
 	void psLinuxMonospace();
 	void psLinuxClearFormat();
-
-	static void sniSignalEmitted(
-		GDBusProxy *proxy,
-		gchar *sender_name,
-		gchar *signal_name,
-		GVariant *parameters,
-		gpointer user_data);
-#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
 
 };
 

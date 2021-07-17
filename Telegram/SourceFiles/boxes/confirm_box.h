@@ -23,6 +23,7 @@ namespace Ui {
 class Checkbox;
 class FlatLabel;
 class EmptyUserpic;
+class LinkButton;
 } // namespace Ui
 
 class InformBox;
@@ -140,7 +141,7 @@ public:
 
 };
 
-class MaxInviteBox : public Ui::BoxContent, private base::Subscriber {
+class MaxInviteBox final : public Ui::BoxContent {
 public:
 	MaxInviteBox(QWidget*, not_null<ChannelData*> channel);
 
@@ -243,6 +244,7 @@ private:
 	object_ptr<Ui::Checkbox> _banUser = { nullptr };
 	object_ptr<Ui::Checkbox> _reportSpam = { nullptr };
 	object_ptr<Ui::Checkbox> _deleteAll = { nullptr };
+	object_ptr<Ui::LinkButton> _autoDeleteSettings = { nullptr };
 
 	Fn<void()> _deleteConfirmedCallback;
 

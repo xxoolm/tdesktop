@@ -22,11 +22,8 @@ constexpr auto kDocumentCacheMask = 0x00000000000000FFULL;
 constexpr auto kDocumentThumbCacheTag = 0x0000000000000200ULL;
 constexpr auto kDocumentThumbCacheMask = 0x00000000000000FFULL;
 constexpr auto kWebDocumentCacheTag = 0x0000020000000000ULL;
-constexpr auto kWebDocumentCacheMask = 0x000000FFFFFFFFFFULL;
 constexpr auto kUrlCacheTag = 0x0000030000000000ULL;
-constexpr auto kUrlCacheMask = 0x000000FFFFFFFFFFULL;
 constexpr auto kGeoPointCacheTag = 0x0000040000000000ULL;
-constexpr auto kGeoPointCacheMask = 0x000000FFFFFFFFFFULL;
 
 } // namespace
 
@@ -133,10 +130,6 @@ void MessageCursor::applyTo(not_null<Ui::InputField*> field) {
 	field->scrollTo(scroll);
 }
 
-HistoryItem *FileClickHandler::getActionItem() const {
-	return _session->data().message(context());
-}
-
 PeerId PeerFromMessage(const MTPmessage &message) {
 	return message.match([](const MTPDmessageEmpty &) {
 		return PeerId(0);
@@ -167,4 +160,13 @@ TimeId DateFromMessage(const MTPmessage &message) {
 	}, [](const auto &message) {
 		return message.vdate().v;
 	});
+}
+
+bool GoodStickerDimensions(int width, int height) {
+	// Show all .webp (except very large ones) as stickers,
+	// allow to open them in media viewer to see details.
+	constexpr auto kLargetsStickerSide = 2560;
+	return (width > 0)
+		&& (height > 0)
+		&& (width * height <= kLargetsStickerSide * kLargetsStickerSide);
 }

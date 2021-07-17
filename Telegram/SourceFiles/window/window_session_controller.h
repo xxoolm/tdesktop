@@ -9,12 +9,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <rpl/variable.h>
 #include "base/flags.h"
-#include "base/observer.h"
 #include "base/object_ptr.h"
 #include "base/weak_ptr.h"
 #include "base/timer.h"
 #include "dialogs/dialogs_key.h"
 #include "ui/effects/animation_value.h"
+#include "ui/layers/layer_widget.h"
+#include "window/window_adaptive.h"
 
 class PhotoData;
 class MainWidget;
@@ -45,6 +46,7 @@ class FormController;
 
 namespace Ui {
 class LayerWidget;
+enum class ReportReason;
 } // namespace Ui
 
 namespace Window {
@@ -150,6 +152,7 @@ public:
 		MsgId messageId = ShowAtUnreadMsgId;
 		RepliesByLinkInfo repliesInfo;
 		QString startToken;
+		std::optional<QString> voicechatHash;
 		FullMsgId clickFromMessageId;
 	};
 	void showPeerByLink(const PeerByLinkInfo &info);
@@ -225,7 +228,7 @@ private:
 
 };
 
-class SessionController : public SessionNavigation, private base::Subscriber {
+class SessionController : public SessionNavigation {
 public:
 	SessionController(
 		not_null<Main::Session*> session,
@@ -237,6 +240,7 @@ public:
 	}
 	[[nodiscard]] not_null<::MainWindow*> widget() const;
 	[[nodiscard]] not_null<MainWidget*> content() const;
+	[[nodiscard]] Adaptive &adaptive() const;
 
 	// We need access to this from MainWidget::MainWidget, where
 	// we can't call content() yet.
@@ -246,6 +250,11 @@ public:
 	[[nodiscard]] bool selectingPeer() const {
 		return _selectingPeer;
 	}
+
+	QPointer<Ui::BoxContent> show(
+		object_ptr<Ui::BoxContent> content,
+		Ui::LayerOptions options = Ui::LayerOption::KeepOther,
+		anim::type animated = anim::type::normal);
 
 	[[nodiscard]] auto tabbedSelector() const
 	-> not_null<ChatHelpers::TabbedSelector*>;
@@ -273,8 +282,8 @@ public:
 
 	void enableGifPauseReason(GifPauseReason reason);
 	void disableGifPauseReason(GifPauseReason reason);
-	base::Observable<void> &gifPauseLevelChanged() {
-		return _gifPauseLevelChanged;
+	rpl::producer<> gifPauseLevelChanged() const {
+		return _gifPauseLevelChanged.events();
 	}
 	bool isGifPausedAtLeastFor(GifPauseReason reason) const;
 	void floatPlayerAreaUpdated();
@@ -296,9 +305,15 @@ public:
 	void resizeForThirdSection();
 	void closeThirdSection();
 
+	enum class GroupCallJoinConfirm {
+		None,
+		IfNowInAnother,
+		Always,
+	};
 	void startOrJoinGroupCall(
 		not_null<PeerData*> peer,
-		bool confirmedLeaveOther = false);
+		QString joinHash = QString(),
+		GroupCallJoinConfirm confirm = GroupCallJoinConfirm::IfNowInAnother);
 
 	void showSection(
 		std::shared_ptr<SectionMemento> memento,
@@ -311,6 +326,14 @@ public:
 		PeerId peerId,
 		const SectionShow &params = SectionShow::Way::ClearStack,
 		MsgId msgId = ShowAtUnreadMsgId) override;
+
+	void showPeerHistoryAtItem(not_null<const HistoryItem*> item);
+	void cancelUploadLayer(not_null<HistoryItem*> item);
+
+	void showLayer(
+		std::unique_ptr<Ui::LayerWidget> &&layer,
+		Ui::LayerOptions options,
+		anim::type animated = anim::type::normal);
 
 	void showSpecialLayer(
 		object_ptr<Ui::LayerWidget> &&layer,
@@ -325,8 +348,25 @@ public:
 		Dialogs::Key chat,
 		QDate requestedDate);
 
+	void showAddContact();
+	void showNewGroup();
+	void showNewChannel();
+
 	void showPassportForm(const Passport::FormRequest &request);
 	void clearPassportForm();
+
+	void openPhoto(not_null<PhotoData*> photo, FullMsgId contextId);
+	void openPhoto(not_null<PhotoData*> photo, not_null<PeerData*> peer);
+	void openDocument(
+		not_null<DocumentData*> document,
+		FullMsgId contextId,
+		bool showInMediaView = false);
+
+	void showChooseReportMessages(
+		not_null<PeerData*> peer,
+		Ui::ReportReason reason,
+		Fn<void(MessageIdsList)> done);
+	void clearChooseReportMessages();
 
 	base::Variable<bool> &dialogsListFocused() {
 		return _dialogsListFocused;
@@ -388,7 +428,7 @@ private:
 	std::unique_ptr<FiltersMenu> _filters;
 
 	GifPauseReasons _gifPauseReasons = 0;
-	base::Observable<void> _gifPauseLevelChanged;
+	rpl::event_stream<> _gifPauseLevelChanged;
 
 	// Depends on _gifPause*.
 	const std::unique_ptr<ChatHelpers::TabbedSelector> _tabbedSelector;

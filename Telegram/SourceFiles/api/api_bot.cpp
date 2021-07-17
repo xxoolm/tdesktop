@@ -34,7 +34,7 @@ void SendBotCallbackData(
 		int row,
 		int column,
 		std::optional<MTPInputCheckPasswordSRP> password = std::nullopt,
-		Fn<void(const RPCError &)> handleError = nullptr) {
+		Fn<void(const MTP::Error &)> handleError = nullptr) {
 	if (!IsServerMsgId(item->id)) {
 		return;
 	}
@@ -115,7 +115,7 @@ void SendBotCallbackData(
 				Ui::hideLayer();
 			}
 		});
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		const auto item = owner->message(fullId);
 		if (!item) {
 			return;
@@ -156,7 +156,6 @@ void SendBotCallbackDataWithPassword(
 	const auto session = &history->session();
 	const auto owner = &history->owner();
 	const auto api = &session->api();
-	const auto bot = item->getMessageBot();
 	const auto fullId = item->fullId();
 	const auto getButton = [=] {
 		return HistoryMessageMarkupButton::Get(
@@ -170,7 +169,7 @@ void SendBotCallbackDataWithPassword(
 		return;
 	}
 	api->reloadPasswordState();
-	SendBotCallbackData(item, row, column, MTP_inputCheckPasswordEmpty(), [=](const RPCError &error) {
+	SendBotCallbackData(item, row, column, MTP_inputCheckPasswordEmpty(), [=](const MTP::Error &error) {
 		auto box = PrePasswordErrorBox(
 			error,
 			session,
@@ -212,7 +211,7 @@ void SendBotCallbackDataWithPassword(
 						return;
 					}
 					if (const auto item = owner->message(fullId)) {
-						SendBotCallbackData(item, row, column, result.result, [=](const RPCError &error) {
+						SendBotCallbackData(item, row, column, result.result, [=](const MTP::Error &error) {
 							if (*box) {
 								(*box)->handleCustomCheckError(error);
 							}

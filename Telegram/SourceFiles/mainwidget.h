@@ -15,7 +15,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/sender.h"
 #include "data/data_pts_waiter.h"
 
-class RPCError;
 struct HistoryMessageMarkupButton;
 class MainWindow;
 class ConfirmBox;
@@ -24,6 +23,10 @@ class StackItem;
 struct FileLoadResult;
 class History;
 class Image;
+
+namespace MTP {
+class Error;
+} // namespace MTP
 
 namespace Api {
 struct SendAction;
@@ -65,6 +68,7 @@ namespace Ui {
 class ResizeArea;
 class PlainShadow;
 class DropdownMenu;
+enum class ReportReason;
 template <typename Widget>
 class SlideWrap;
 } // namespace Ui
@@ -156,7 +160,6 @@ public:
 
 	void showForwardLayer(MessageIdsList &&items);
 	void showSendPathsLayer();
-	void cancelUploadLayer(not_null<HistoryItem*> item);
 	void shareUrlLayer(const QString &url, const QString &text);
 	void inlineSwitchLayer(const QString &botAndQuery);
 	void hiderLayer(base::unique_qptr<Window::HistoryHider> h);
@@ -187,7 +190,6 @@ public:
 	void searchMessages(const QString &query, Dialogs::Key inChat);
 
 	QPixmap cachedBackground(const QRect &forRect, int &x, int &y);
-	void updateScrollColors();
 
 	void setChatBackground(
 		const Data::WallPaper &background,
@@ -210,6 +212,12 @@ public:
 
 	void searchInChat(Dialogs::Key chat);
 
+	void showChooseReportMessages(
+		not_null<PeerData*> peer,
+		Ui::ReportReason reason,
+		Fn<void(MessageIdsList)> done);
+	void clearChooseReportMessages();
+
 	void ui_showPeerHistory(
 		PeerId peer,
 		const SectionShow &params,
@@ -228,7 +236,7 @@ public:
 		Fn<void()> callback,
 		const SectionShow &params) const;
 
-public slots:
+public Q_SLOTS:
 	void inlineResultLoadProgress(FileLoader *loader);
 	void inlineResultLoadFailed(FileLoader *loader, bool started);
 
@@ -309,12 +317,14 @@ private:
 		Window::Column widgetColumn)> callback) override;
 	bool floatPlayerIsVisible(not_null<HistoryItem*> item) override;
 	void floatPlayerClosed(FullMsgId itemId);
+	void floatPlayerDoubleClickEvent(
+		not_null<const HistoryItem*> item) override;
 
 	void viewsIncrementDone(
 		QVector<MTPint> ids,
 		const MTPmessages_MessageViews &result,
 		mtpRequestId requestId);
-	void viewsIncrementFail(const RPCError &error, mtpRequestId requestId);
+	void viewsIncrementFail(const MTP::Error &error, mtpRequestId requestId);
 
 	void refreshResizeAreas();
 	template <typename MoveCallback, typename FinishCallback>
@@ -333,6 +343,10 @@ private:
 		QImage &&image);
 
 	void handleHistoryBack();
+
+	bool isOneColumn() const;
+	bool isNormalColumn() const;
+	bool isThreeColumn() const;
 
 	const not_null<Window::SessionController*> _controller;
 	MTP::Sender _api;

@@ -151,7 +151,7 @@ void TabbedPanel::updateContentHeight() {
 	auto marginsHeight = _selector->marginTop() + _selector->marginBottom();
 	auto availableHeight = _bottom - marginsHeight;
 	auto wantedContentHeight = qRound(_heightRatio * availableHeight) - addedHeight;
-	auto contentHeight = marginsHeight + snap(
+	auto contentHeight = marginsHeight + std::clamp(
 		wantedContentHeight,
 		_minContentHeight,
 		_maxContentHeight);
@@ -161,7 +161,6 @@ void TabbedPanel::updateContentHeight() {
 		return;
 	}
 
-	auto was = _contentHeight;
 	_contentHeight = contentHeight;
 
 	resize(QRect(0, 0, innerRect().width(), _contentHeight).marginsAdded(innerPadding()).size());
@@ -348,7 +347,7 @@ QImage TabbedPanel::grabForAnimation() {
 	_a_show = base::take(showAnimation);
 	_showAnimation = base::take(showAnimationData);
 	_a_opacity = base::take(opacityAnimation);
-	_cache = base::take(_cache);
+	_cache = base::take(cache);
 
 	return result;
 }

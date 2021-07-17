@@ -87,7 +87,10 @@ void Widget::moveBottom(int bottom) {
 void Widget::updateContentHeight() {
 	auto addedHeight = innerPadding().top() + innerPadding().bottom();
 	auto wantedContentHeight = qRound(st::emojiPanHeightRatio * _bottom) - addedHeight;
-	auto contentHeight = snap(wantedContentHeight, st::inlineResultsMinHeight, st::inlineResultsMaxHeight);
+	auto contentHeight = std::clamp(
+		wantedContentHeight,
+		st::inlineResultsMinHeight,
+		st::inlineResultsMaxHeight);
 	accumulate_min(contentHeight, _bottom - addedHeight);
 	accumulate_min(contentHeight, _contentMaxHeight);
 	auto resultTop = _bottom - addedHeight - contentHeight;
@@ -210,7 +213,7 @@ void Widget::startShowAnimation() {
 		showChildren();
 		auto image = grabForPanelAnimation();
 		_a_opacity = base::take(opacityAnimation);
-		_cache = base::take(_cache);
+		_cache = base::take(cache);
 
 		_showAnimation = std::make_unique<Ui::PanelAnimation>(st::emojiPanAnimation, Ui::PanelAnimation::Origin::BottomLeft);
 		auto inner = rect().marginsRemoved(st::emojiPanMargins);
@@ -445,7 +448,7 @@ void Widget::onInlineRequest() {
 		MTP_string(nextOffset)
 	)).done([=](const MTPmessages_BotResults &result) {
 		inlineResultsDone(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		// show error?
 		_requesting.fire(false);
 		_inlineRequestId = 0;

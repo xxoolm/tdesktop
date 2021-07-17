@@ -25,8 +25,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/notifications_manager_default.h"
 #include "window/window_session_controller.h"
 #include "window/window_controller.h"
-#include "window/themes/window_theme.h"
 #include "platform/mac/touchbar/mac_touchbar_manager.h"
+#include "platform/platform_specific.h"
 #include "platform/platform_notifications_manager.h"
 #include "base/platform/base_platform_info.h"
 #include "boxes/peer_list_controllers.h"
@@ -34,8 +34,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "base/platform/mac/base_utilities_mac.h"
 #include "ui/widgets/input_fields.h"
+#include "ui/ui_utility.h"
 #include "facades.h"
-#include "app.h"
 
 #include <QtWidgets/QApplication>
 #include <QtGui/QClipboard>
@@ -44,7 +44,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <CoreFoundation/CFURL.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/hidsystem/ev_keymap.h>
-#include <SPMediaKeyTap.h>
 
 @interface MainWindowObserver : NSObject {
 }
@@ -105,25 +104,6 @@ private:
 
 #endif // OS_MAC_OLD
 
-class EventFilter : public QAbstractNativeEventFilter {
-public:
-	EventFilter(not_null<MainWindow*> window) : _window(window) {
-	}
-
-	bool nativeEventFilter(
-			const QByteArray &eventType,
-			void *message,
-			long *result) {
-		return Core::Sandbox::Instance().customEnterFromEventLoop([&] {
-			return _window->psFilterNativeEvent(message);
-		});
-	}
-
-private:
-	not_null<MainWindow*> _window;
-
-};
-
 [[nodiscard]] QImage TrayIconBack(bool darkMode) {
 	static const auto WithColor = [](QColor color) {
 		return st::macTrayIcon.instance(color, 100);
@@ -151,8 +131,6 @@ public:
 	void updateNativeTitle();
 
 	void enableShadow(WId winId);
-
-	bool filterNativeEvent(void *event);
 
 	void willEnterFullScreen();
 	void willExitFullScreen();
@@ -187,8 +165,6 @@ private:
 	int _generalPasteboardChangeCount = -1;
 	bool _generalPasteboardHasText = false;
 
-	EventFilter _nativeEventFilter;
-
 };
 
 } // namespace Platform
@@ -215,11 +191,11 @@ private:
 }
 
 - (void) screenIsLocked:(NSNotification *)aNotification {
-	Global::SetScreenIsLocked(true);
+	Core::App().setScreenIsLocked(true);
 }
 
 - (void) screenIsUnlocked:(NSNotification *)aNotification {
-	Global::SetScreenIsLocked(false);
+	Core::App().setScreenIsLocked(false);
 }
 
 - (void) windowWillEnterFullScreen:(NSNotification *)aNotification {
@@ -259,8 +235,7 @@ void ForceDisabled(QAction *action, bool disabled) {
 
 MainWindow::Private::Private(not_null<MainWindow*> window)
 : _public(window)
-, _observer([[MainWindowObserver alloc] init:this])
-, _nativeEventFilter(window) {
+, _observer([[MainWindowObserver alloc] init:this]) {
 	_generalPasteboard = [NSPasteboard generalPasteboard];
 
 	@autoreleasepool {
@@ -269,11 +244,6 @@ MainWindow::Private::Private(not_null<MainWindow*> window)
 	[[NSDistributedNotificationCenter defaultCenter] addObserver:_observer selector:@selector(darkModeChanged:) name:Q2NSString(strNotificationAboutThemeChange()) object:nil];
 	[[NSDistributedNotificationCenter defaultCenter] addObserver:_observer selector:@selector(screenIsLocked:) name:Q2NSString(strNotificationAboutScreenLocked()) object:nil];
 	[[NSDistributedNotificationCenter defaultCenter] addObserver:_observer selector:@selector(screenIsUnlocked:) name:Q2NSString(strNotificationAboutScreenUnlocked()) object:nil];
-
-#ifndef OS_MAC_STORE
-	// Register defaults for the whitelist of apps that want to use media keys
-	[[NSUserDefaults standardUserDefaults] registerDefaults:[NSDictionary dictionaryWithObjectsAndKeys:[SPMediaKeyTap defaultMediaKeyUserBundleIdentifiers], kMediaKeyUsingBundleIdentifiersDefaultsKey, nil]];
-#endif // !OS_MAC_STORE
 
 	}
 }
@@ -466,21 +436,6 @@ void MainWindow::Private::enableShadow(WId winId) {
 //	[[(NSView*)winId window] setHasShadow:YES];
 }
 
-bool MainWindow::Private::filterNativeEvent(void *event) {
-	NSEvent *e = static_cast<NSEvent*>(event);
-	if (e && [e type] == NSSystemDefined && [e subtype] == SPSystemDefinedEventMediaKeys) {
-#ifndef OS_MAC_STORE
-		// If event tap is not installed, handle events that reach the app instead
-		if (![SPMediaKeyTap usesGlobalMediaKeyTap]) {
-			return objc_handleMediaKeyEvent(e);
-		}
-#else // !OS_MAC_STORE
-		return objc_handleMediaKeyEvent(e);
-#endif // else for !OS_MAC_STORE
-	}
-	return false;
-}
-
 MainWindow::Private::~Private() {
 	[_observer release];
 }
@@ -488,8 +443,6 @@ MainWindow::Private::~Private() {
 MainWindow::MainWindow(not_null<Window::Controller*> controller)
 : Window::MainWindow(controller)
 , _private(std::make_unique<Private>(this)) {
-	QCoreApplication::instance()->installNativeEventFilter(
-		&_private->_nativeEventFilter);
 
 #ifndef OS_MAC_OLD
 	auto forceOpenGL = std::make_unique<QOpenGLWidget>(this);
@@ -497,11 +450,10 @@ MainWindow::MainWindow(not_null<Window::Controller*> controller)
 
 	_hideAfterFullScreenTimer.setCallback([this] { hideAndDeactivate(); });
 
-	subscribe(Window::Theme::Background(), [this](const Window::Theme::BackgroundUpdate &data) {
-		if (data.paletteChanged()) {
-			_private->updateNativeTitle();
-		}
-	});
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		_private->updateNativeTitle();
+	}, lifetime());
 }
 
 void MainWindow::closeWithoutDestroy() {
@@ -524,6 +476,18 @@ void MainWindow::stateChangedHook(Qt::WindowState state) {
 
 void MainWindow::handleActiveChangedHook() {
 	InvokeQueued(this, [this] { _private->updateNativeTitle(); });
+
+	// On macOS just remove trayIcon menu if the window is not active.
+	// So we will activate the window on click instead of showing the menu.
+	if (isActiveForTrayMenu()) {
+		if (trayIcon
+			&& trayIconMenu
+			&& trayIcon->contextMenu() != trayIconMenu) {
+			trayIcon->setContextMenu(trayIconMenu);
+		}
+	} else if (trayIcon) {
+		trayIcon->setContextMenu(nullptr);
+	}
 }
 
 void MainWindow::initHook() {
@@ -554,16 +518,6 @@ void MainWindow::psShowTrayMenu() {
 }
 
 void MainWindow::psTrayMenuUpdated() {
-	// On macOS just remove trayIcon menu if the window is not active.
-	// So we will activate the window on click instead of showing the menu.
-	if (isActive()) {
-		if (trayIcon && trayIconMenu
-			&& trayIcon->contextMenu() != trayIconMenu) {
-			trayIcon->setContextMenu(trayIconMenu);
-		}
-	} else if (trayIcon) {
-		trayIcon->setContextMenu(nullptr);
-	}
 }
 
 void MainWindow::psSetupTrayIcon() {
@@ -572,6 +526,11 @@ void MainWindow::psSetupTrayIcon() {
 		trayIcon->setIcon(generateIconForTray(
 			Core::App().unreadBadge(),
 			Core::App().unreadBadgeMuted()));
+		if (isActiveForTrayMenu()) {
+			trayIcon->setContextMenu(trayIconMenu);
+		} else {
+			trayIcon->setContextMenu(nullptr);
+		}
 		attachToTrayIcon(trayIcon);
 	} else {
 		updateIconCounters();
@@ -580,9 +539,9 @@ void MainWindow::psSetupTrayIcon() {
 	trayIcon->show();
 }
 
-void MainWindow::workmodeUpdated(DBIWorkMode mode) {
+void MainWindow::workmodeUpdated(Core::Settings::WorkMode mode) {
 	psSetupTrayIcon();
-	if (mode == dbiwmWindowOnly) {
+	if (mode == Core::Settings::WorkMode::WindowOnly) {
 		if (trayIcon) {
 			trayIcon->setContextMenu(0);
 			delete trayIcon;
@@ -671,10 +630,22 @@ QIcon MainWindow::generateIconForTray(int counter, bool muted) const {
 	_placeCounter(darkMode, size, counter, bg, muted ? st::trayCounterFgMacInvert : st::trayCounterFg);
 	_placeCounter(lightModeActive, size, counter, st::trayCounterBgMacInvert, st::trayCounterFgMacInvert);
 	_placeCounter(darkModeActive, size, counter, st::trayCounterBgMacInvert, st::trayCounterFgMacInvert);
-	result.addPixmap(App::pixmapFromImageInPlace(std::move(lightMode)), QIcon::Normal, QIcon::Off);
-	result.addPixmap(App::pixmapFromImageInPlace(std::move(darkMode)), QIcon::Normal, QIcon::On);
-	result.addPixmap(App::pixmapFromImageInPlace(std::move(lightModeActive)), QIcon::Active, QIcon::Off);
-	result.addPixmap(App::pixmapFromImageInPlace(std::move(darkModeActive)), QIcon::Active, QIcon::On);
+	result.addPixmap(Ui::PixmapFromImage(
+		std::move(lightMode)),
+		QIcon::Normal,
+		QIcon::Off);
+	result.addPixmap(Ui::PixmapFromImage(
+		std::move(darkMode)),
+		QIcon::Normal,
+		QIcon::On);
+	result.addPixmap(Ui::PixmapFromImage(
+		std::move(lightModeActive)),
+		QIcon::Active,
+		QIcon::Off);
+	result.addPixmap(Ui::PixmapFromImage(
+		std::move(darkModeActive)),
+		QIcon::Active,
+		QIcon::On);
 	return result;
 }
 
@@ -683,23 +654,52 @@ void MainWindow::initShadows() {
 }
 
 void MainWindow::createGlobalMenu() {
+	const auto ensureWindowShown = [=] {
+		if (isHidden()) {
+			showFromTray();
+		}
+	};
+
 	auto main = psMainMenu.addMenu(qsl("Telegram"));
-	auto about = main->addAction(tr::lng_mac_menu_about_telegram(tr::now, lt_telegram, qsl("Telegram")));
-	connect(about, &QAction::triggered, about, [] {
-		if (App::wnd() && App::wnd()->isHidden()) App::wnd()->showFromTray();
-		Ui::show(Box<AboutBox>());
-	});
-	about->setMenuRole(QAction::AboutQtRole);
+	{
+		auto callback = [=] {
+			ensureWindowShown();
+			controller().show(Box<AboutBox>());
+		};
+		main->addAction(
+			tr::lng_mac_menu_about_telegram(
+				tr::now,
+				lt_telegram,
+				qsl("Telegram")),
+			std::move(callback))
+		->setMenuRole(QAction::AboutQtRole);
+	}
 
 	main->addSeparator();
-	QAction *prefs = main->addAction(tr::lng_mac_menu_preferences(tr::now), App::wnd(), SLOT(showSettings()), QKeySequence(Qt::ControlModifier | Qt::Key_Comma));
-	prefs->setMenuRole(QAction::PreferencesRole);
+	{
+		auto callback = [=] {
+			ensureWindowShown();
+			controller().showSettings();
+		};
+		main->addAction(
+			tr::lng_mac_menu_preferences(tr::now),
+			this,
+			std::move(callback),
+			QKeySequence(Qt::ControlModifier | Qt::Key_Comma))
+		->setMenuRole(QAction::PreferencesRole);
+	}
 
 	QMenu *file = psMainMenu.addMenu(tr::lng_mac_menu_file(tr::now));
-	psLogout = file->addAction(tr::lng_mac_menu_logout(tr::now));
-	connect(psLogout, &QAction::triggered, psLogout, [] {
-		if (App::wnd()) App::wnd()->showLogoutConfirmation();
-	});
+	{
+		auto callback = [=] {
+			ensureWindowShown();
+			controller().showLogoutConfirmation();
+		};
+		psLogout = file->addAction(
+			tr::lng_mac_menu_logout(tr::now),
+			this,
+			std::move(callback));
+	}
 
 	QMenu *edit = psMainMenu.addMenu(tr::lng_mac_menu_edit(tr::now));
 	psUndo = edit->addAction(tr::lng_mac_menu_undo(tr::now), this, SLOT(psMacUndo()), QKeySequence::Undo);
@@ -728,19 +728,52 @@ void MainWindow::createGlobalMenu() {
 	psContacts = window->addAction(tr::lng_mac_menu_contacts(tr::now));
 	connect(psContacts, &QAction::triggered, psContacts, crl::guard(this, [=] {
 		if (isHidden()) {
-			App::wnd()->showFromTray();
+			showFromTray();
 		}
 		if (!sessionController()) {
 			return;
 		}
-		Ui::show(PrepareContactsBox(sessionController()));
+		sessionController()->show(PrepareContactsBox(sessionController()));
 	}));
-	psAddContact = window->addAction(tr::lng_mac_menu_add_contact(tr::now), App::wnd(), SLOT(onShowAddContact()));
+	{
+		auto callback = [=] {
+			Expects(sessionController() != nullptr);
+			ensureWindowShown();
+			sessionController()->showAddContact();
+		};
+		psAddContact = window->addAction(
+			tr::lng_mac_menu_add_contact(tr::now),
+			this,
+			std::move(callback));
+	}
 	window->addSeparator();
-	psNewGroup = window->addAction(tr::lng_mac_menu_new_group(tr::now), App::wnd(), SLOT(onShowNewGroup()));
-	psNewChannel = window->addAction(tr::lng_mac_menu_new_channel(tr::now), App::wnd(), SLOT(onShowNewChannel()));
+	{
+		auto callback = [=] {
+			Expects(sessionController() != nullptr);
+			ensureWindowShown();
+			sessionController()->showNewGroup();
+		};
+		psNewGroup = window->addAction(
+			tr::lng_mac_menu_new_group(tr::now),
+			this,
+			std::move(callback));
+	}
+	{
+		auto callback = [=] {
+			Expects(sessionController() != nullptr);
+			ensureWindowShown();
+			sessionController()->showNewChannel();
+		};
+		psNewChannel = window->addAction(
+			tr::lng_mac_menu_new_channel(tr::now),
+			this,
+			std::move(callback));
+	}
 	window->addSeparator();
-	psShowTelegram = window->addAction(tr::lng_mac_menu_show(tr::now), App::wnd(), SLOT(showFromTray()));
+	psShowTelegram = window->addAction(
+		tr::lng_mac_menu_show(tr::now),
+		this,
+		[=] { showFromTray(); });
 
 	updateGlobalMenu();
 }
@@ -802,7 +835,9 @@ void MainWindow::psMacClearFormat() {
 }
 
 void MainWindow::updateGlobalMenuHook() {
-	if (!App::wnd() || !positionInited()) return;
+	if (!positionInited()) {
+		return;
+	}
 
 	auto focused = QApplication::focusWidget();
 	bool canUndo = false, canRedo = false, canCut = false, canCopy = false, canPaste = false, canDelete = false, canSelectAll = false;
@@ -833,7 +868,7 @@ void MainWindow::updateGlobalMenuHook() {
 
 	_canApplyMarkdown = canApplyMarkdown;
 
-	App::wnd()->updateIsActive();
+	updateIsActive();
 	const auto logged = (sessionController() != nullptr);
 	const auto inactive = !logged || controller().locked();
 	const auto support = logged && account().session().supportMode();
@@ -849,7 +884,7 @@ void MainWindow::updateGlobalMenuHook() {
 	ForceDisabled(psAddContact, inactive);
 	ForceDisabled(psNewGroup, inactive || support);
 	ForceDisabled(psNewChannel, inactive || support);
-	ForceDisabled(psShowTelegram, App::wnd()->isActive());
+	ForceDisabled(psShowTelegram, isActive());
 
 	ForceDisabled(psBold, !canApplyMarkdown);
 	ForceDisabled(psItalic, !canApplyMarkdown);
@@ -857,10 +892,6 @@ void MainWindow::updateGlobalMenuHook() {
 	ForceDisabled(psStrikeOut, !canApplyMarkdown);
 	ForceDisabled(psMonospace, !canApplyMarkdown);
 	ForceDisabled(psClearFormat, !canApplyMarkdown);
-}
-
-bool MainWindow::psFilterNativeEvent(void *event) {
-	return _private->filterNativeEvent(event);
 }
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *evt) {

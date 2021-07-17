@@ -27,7 +27,7 @@ public:
 		not_null<PeerData*> peer);
 
 	struct Result {
-		MTPDchatBannedRights::Flags rights;
+		ChatRestrictions rights;
 		int slowmodeSeconds = 0;
 	};
 
@@ -39,6 +39,7 @@ protected:
 private:
 	Fn<int()> addSlowmodeSlider(not_null<Ui::VerticalLayout*> container);
 	void addSlowmodeLabels(not_null<Ui::VerticalLayout*> container);
+	void addSuggestGigagroup(not_null<Ui::VerticalLayout*> container);
 	void addBannedButtons(not_null<Ui::VerticalLayout*> container);
 
 	const not_null<Window::SessionNavigation*> _navigation;
@@ -48,6 +49,9 @@ private:
 
 };
 
+[[nodiscard]] Fn<void()> AboutGigagroupCallback(
+	not_null<ChannelData*> channel);
+
 template <typename Flags>
 struct EditFlagsControl {
 	object_ptr<Ui::RpWidget> widget;
@@ -55,17 +59,17 @@ struct EditFlagsControl {
 	rpl::producer<Flags> changes;
 };
 
-EditFlagsControl<MTPDchatBannedRights::Flags> CreateEditRestrictions(
+EditFlagsControl<ChatRestrictions> CreateEditRestrictions(
 	QWidget *parent,
 	rpl::producer<QString> header,
-	MTPDchatBannedRights::Flags restrictions,
-	std::map<MTPDchatBannedRights::Flags, QString> disabledMessages);
+	ChatRestrictions restrictions,
+	std::map<ChatRestrictions, QString> disabledMessages);
 
-EditFlagsControl<MTPDchatAdminRights::Flags> CreateEditAdminRights(
+EditFlagsControl<ChatAdminRights> CreateEditAdminRights(
 	QWidget *parent,
 	rpl::producer<QString> header,
-	MTPDchatAdminRights::Flags rights,
-	std::map<MTPDchatAdminRights::Flags, QString> disabledMessages,
+	ChatAdminRights rights,
+	std::map<ChatAdminRights, QString> disabledMessages,
 	bool isGroup,
 	bool anyoneCanAddMembers);
 

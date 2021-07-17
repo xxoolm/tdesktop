@@ -26,8 +26,9 @@ Content ContentFromState(
 			const QString &id,
 			const QString &label,
 			const QString &info,
-			float64 progress) {
-		result.rows.push_back({ id, label, info, progress });
+			float64 progress,
+			uint64 randomId = 0) {
+		result.rows.push_back({ id, label, info, progress, randomId });
 	};
 	const auto pushMain = [&](const QString &label) {
 		const auto info = (state.entityCount > 0)
@@ -40,7 +41,6 @@ Content ContentFromState(
 			return;
 		}
 		const auto substepsTotal = state.substepsTotal;
-		const auto step = static_cast<int>(state.step);
 		const auto done = state.substepsPassed;
 		const auto add = state.substepsNow;
 		const auto doneProgress = done / float64(substepsTotal);
@@ -56,7 +56,10 @@ Content ContentFromState(
 			: addPart(state.entityIndex, state.entityCount);
 		push("main", label, info, doneProgress + addProgress);
 	};
-	const auto pushBytes = [&](const QString &id, const QString &label) {
+	const auto pushBytes = [&](
+			const QString &id,
+			const QString &label,
+			uint64 randomId) {
 		if (!state.bytesCount) {
 			return;
 		}
@@ -64,7 +67,7 @@ Content ContentFromState(
 		const auto info = Ui::FormatDownloadText(
 			state.bytesLoaded,
 			state.bytesCount);
-		push(id, label, info, progress);
+		push(id, label, info, progress, randomId);
 	};
 	switch (state.step) {
 	case Step::Initializing:
@@ -80,7 +83,8 @@ Content ContentFromState(
 		pushMain(tr::lng_export_state_userpics(tr::now));
 		pushBytes(
 			"userpic" + QString::number(state.entityIndex),
-			state.bytesName);
+			state.bytesName,
+			state.bytesRandomId);
 		break;
 	case Step::Contacts:
 		pushMain(tr::lng_export_option_contacts(tr::now));
@@ -117,7 +121,8 @@ Content ContentFromState(
 				+ QString::number(state.entityIndex)
 				+ '_'
 				+ QString::number(state.itemIndex)),
-			state.bytesName);
+			state.bytesName,
+			state.bytesRandomId);
 		break;
 	default: Unexpected("Step in ContentFromState.");
 	}

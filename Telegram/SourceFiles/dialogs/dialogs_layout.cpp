@@ -17,6 +17,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/empty_userpic.h"
 #include "ui/text/text_options.h"
 #include "ui/unread_badge.h"
+#include "ui/ui_utility.h"
 #include "lang/lang_keys.h"
 #include "support/support_helper.h"
 #include "main/main_session.h"
@@ -29,7 +30,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_user.h"
 #include "data/data_folder.h"
 #include "data/data_peer_values.h"
-#include "app.h"
 
 namespace Dialogs {
 namespace Layout {
@@ -218,7 +218,6 @@ enum class Flag {
 	SavedMessages    = 0x08,
 	RepliesMessages  = 0x10,
 	AllowUserOnline  = 0x20,
-	//FeedSearchResult = 0x10, // #feed
 };
 inline constexpr bool is_flag_type(Flag) { return true; }
 
@@ -317,7 +316,7 @@ void paintRow(
 		st::msgNameFont->height);
 
 	const auto promoted = (history && history->useTopPromotion())
-		&& !(flags & (Flag::SearchResult/* | Flag::FeedSearchResult*/)); // #feed
+		&& !(flags & Flag::SearchResult);
 	if (promoted) {
 		const auto type = history->topPromotionType();
 		const auto custom = type.isEmpty()
@@ -329,16 +328,11 @@ void paintRow(
 			? tr::lng_badge_psa_default(tr::now)
 			: custom;
 		PaintRowTopRight(p, text, rectForName, active, selected);
-	} else if (from/* && !(flags & Flag::FeedSearchResult)*/) { // #feed
+	} else if (from) {
 		if (const auto chatTypeIcon = ChatTypeIcon(from, active, selected)) {
 			chatTypeIcon->paint(p, rectForName.topLeft(), fullWidth);
 			rectForName.setLeft(rectForName.left() + st::dialogsChatTypeSkip);
 		}
-	//} else if (const auto feed = chat.feed()) { // #feed
-	//	if (const auto feedTypeIcon = FeedTypeIcon(feed, active, selected)) {
-	//		feedTypeIcon->paint(p, rectForName.topLeft(), fullWidth);
-	//		rectForName.setLeft(rectForName.left() + st::dialogsChatTypeSkip);
-	//	}
 	}
 	auto texttop = st::dialogsPadding.y()
 		+ st::msgNameFont->height
@@ -451,6 +445,7 @@ void paintRow(
 		sendStateIcon->paint(p, rectForName.topLeft() + QPoint(rectForName.width(), 0), fullWidth);
 	}
 
+	p.setFont(st::msgNameFont);
 	if (flags & (Flag::SavedMessages | Flag::RepliesMessages)) {
 		auto text = (flags & Flag::SavedMessages)
 			? tr::lng_saved_messages(tr::now)
@@ -459,7 +454,6 @@ void paintRow(
 		if (textWidth > rectForName.width()) {
 			text = st::msgNameFont->elided(text, rectForName.width());
 		}
-		p.setFont(st::msgNameFont);
 		p.setPen(active
 			? st::dialogsNameFgActive
 			: selected
@@ -495,15 +489,18 @@ void paintRow(
 			: st::dialogsNameFg);
 		from->nameText().drawElided(p, rectForName.left(), rectForName.top(), rectForName.width());
 	} else if (hiddenSenderInfo) {
+		p.setPen(active
+			? st::dialogsNameFgActive
+			: selected
+			? st::dialogsNameFgOver
+			: st::dialogsNameFg);
 		hiddenSenderInfo->nameText.drawElided(p, rectForName.left(), rectForName.top(), rectForName.width());
 	} else {
-		const auto nameFg = active
+		p.setPen(active
 			? st::dialogsNameFgActive
-			: (selected
-				? st::dialogsArchiveFgOver
-				: st::dialogsArchiveFg);
-		p.setPen(nameFg);
-		p.setFont(st::msgNameFont);
+			: selected
+			? st::dialogsArchiveFgOver
+			: st::dialogsArchiveFg);
 		auto text = entry->chatListName(); // TODO feed name with emoji
 		auto textWidth = st::msgNameFont->width(text);
 		if (textWidth > rectForName.width()) {
@@ -519,6 +516,8 @@ struct UnreadBadgeSizeData {
 };
 class UnreadBadgeStyleData : public Data::AbstractStructure {
 public:
+	UnreadBadgeStyleData();
+
 	UnreadBadgeSizeData sizes[UnreadBadgeSizesCount];
 	style::color bg[6] = {
 		st::dialogsUnreadBg,
@@ -528,8 +527,23 @@ public:
 		st::dialogsUnreadBgMutedOver,
 		st::dialogsUnreadBgMutedActive
 	};
+	rpl::lifetime lifetime;
 };
 Data::GlobalStructurePointer<UnreadBadgeStyleData> unreadBadgeStyle;
+
+UnreadBadgeStyleData::UnreadBadgeStyleData() {
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		for (auto &data : sizes) {
+			for (auto &left : data.left) {
+				left = QPixmap();
+			}
+			for (auto &right : data.right) {
+				right = QPixmap();
+			}
+		}
+	}, lifetime);
+}
 
 void createCircleMask(UnreadBadgeSizeData *data, int size) {
 	if (!data->circle.isNull()) return;
@@ -571,14 +585,6 @@ const style::icon *ChatTypeIcon(
 	return nullptr;
 }
 
-//const style::icon *FeedTypeIcon( // #feed
-//		not_null<Data::Feed*> feed,
-//		bool active,
-//		bool selected) {
-//	return &(active ? st::dialogsFeedIconActive
-//		: (selected ? st::dialogsFeedIconOver : st::dialogsFeedIcon));
-//}
-//
 void paintUnreadBadge(Painter &p, const QRect &rect, const UnreadBadgeStyle &st) {
 	Assert(rect.height() == st.size);
 
@@ -595,8 +601,14 @@ void paintUnreadBadge(Painter &p, const QRect &rect, const UnreadBadgeStyle &st)
 	if (badgeData->left[index].isNull()) {
 		int imgsize = size * cIntRetinaFactor(), imgsizehalf = sizehalf * cIntRetinaFactor();
 		createCircleMask(badgeData, size);
-		badgeData->left[index] = App::pixmapFromImageInPlace(colorizeCircleHalf(badgeData, imgsize, imgsizehalf, 0, bg));
-		badgeData->right[index] = App::pixmapFromImageInPlace(colorizeCircleHalf(badgeData, imgsize, imgsizehalf, imgsize - imgsizehalf, bg));
+		badgeData->left[index] = Ui::PixmapFromImage(
+			colorizeCircleHalf(badgeData, imgsize, imgsizehalf, 0, bg));
+		badgeData->right[index] = Ui::PixmapFromImage(colorizeCircleHalf(
+			badgeData,
+			imgsize,
+			imgsizehalf,
+			imgsize - imgsizehalf,
+			bg));
 	}
 
 	int bar = rect.width() - 2 * sizehalf;
@@ -825,8 +837,10 @@ void RowPainter::paint(
 	const auto hiddenSenderInfo = [&]() -> const HiddenSenderInfo* {
 		if (const auto searchChat = row->searchInChat()) {
 			if (const auto peer = searchChat.peer()) {
-				if (peer->isSelf()) {
-					return item->hiddenForwardedInfo();
+				if (const auto forwarded = item->Get<HistoryMessageForwarded>()) {
+					if (peer->isSelf() || forwarded->imported) {
+						return forwarded->hiddenSenderInfo.get();
+					}
 				}
 			}
 		}
@@ -910,8 +924,7 @@ void RowPainter::paint(
 		| (selected ? Flag::Selected : Flag(0))
 		| Flag::SearchResult
 		| (showSavedMessages ? Flag::SavedMessages : Flag(0))
-		| (showRepliesMessages ? Flag::RepliesMessages : Flag(0))/* // #feed
-		| (row->searchInChat().feed() ? Flag::FeedSearchResult : Flag(0))*/;
+		| (showRepliesMessages ? Flag::RepliesMessages : Flag(0));
 	paintRow(
 		p,
 		row,
@@ -986,19 +999,6 @@ void PaintCollapsedRow(
 			unreadTop,
 			st,
 			nullptr);
-	}
-}
-
-void clearUnreadBadgesCache() {
-	if (unreadBadgeStyle) {
-		for (auto &data : unreadBadgeStyle->sizes) {
-			for (auto &left : data.left) {
-				left = QPixmap();
-			}
-			for (auto &right : data.right) {
-				right = QPixmap();
-			}
-		}
 	}
 }
 

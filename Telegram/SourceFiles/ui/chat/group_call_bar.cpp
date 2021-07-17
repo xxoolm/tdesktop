@@ -7,12 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/chat/group_call_bar.h"
 
-#include "ui/chat/message_bar.h"
+#include "ui/chat/group_call_userpics.h"
 #include "ui/widgets/shadow.h"
 #include "ui/widgets/buttons.h"
-#include "ui/paint/blobs.h"
 #include "lang/lang_keys.h"
-#include "base/openssl_help.h"
+#include "base/unixtime.h"
 #include "styles/style_chat.h"
 #include "styles/style_calls.h"
 #include "styles/style_info.h" // st::topBarArrowPadding, like TopBarWidget.
@@ -21,71 +20,89 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtGui/QtEvents>
 
 namespace Ui {
-namespace {
 
-constexpr auto kDuration = 160;
-constexpr auto kMaxUserpics = 4;
-constexpr auto kWideScale = 5;
-
-constexpr auto kBlobsEnterDuration = crl::time(250);
-constexpr auto kLevelDuration = 100. + 500. * 0.23;
-constexpr auto kBlobScale = 0.605;
-constexpr auto kMinorBlobFactor = 0.9f;
-constexpr auto kUserpicMinScale = 0.8;
-constexpr auto kMaxLevel = 1.;
-constexpr auto kSendRandomLevelInterval = crl::time(100);
-
-auto Blobs()->std::array<Ui::Paint::Blobs::BlobData, 2> {
-	return { {
-		{
-			.segmentsCount = 6,
-			.minScale = kBlobScale * kMinorBlobFactor,
-			.minRadius = st::historyGroupCallBlobMinRadius * kMinorBlobFactor,
-			.maxRadius = st::historyGroupCallBlobMaxRadius * kMinorBlobFactor,
-			.speedScale = 1.,
-			.alpha = .5,
-		},
-		{
-			.segmentsCount = 8,
-			.minScale = kBlobScale,
-			.minRadius = (float)st::historyGroupCallBlobMinRadius,
-			.maxRadius = (float)st::historyGroupCallBlobMaxRadius,
-			.speedScale = 1.,
-			.alpha = .2,
-		},
-	} };
+GroupCallScheduledLeft::GroupCallScheduledLeft(TimeId date)
+: _date(date)
+, _datePrecise(computePreciseDate())
+, _timer([=] { update(); }) {
+	update();
+	base::unixtime::updates(
+	) | rpl::start_with_next([=] {
+		restart();
+	}, _lifetime);
 }
 
-} // namespace
+crl::time GroupCallScheduledLeft::computePreciseDate() const {
+	return crl::now() + (_date - base::unixtime::now()) * crl::time(1000);
+}
 
-struct GroupCallBar::BlobsAnimation {
-	BlobsAnimation(
-		std::vector<Ui::Paint::Blobs::BlobData> blobDatas,
-		float levelDuration,
-		float maxLevel)
-	: blobs(std::move(blobDatas), levelDuration, maxLevel) {
+void GroupCallScheduledLeft::setDate(TimeId date) {
+	if (_date == date) {
+		return;
 	}
+	_date = date;
+	restart();
+}
 
-	Ui::Paint::Blobs blobs;
-	crl::time lastTime = 0;
-	crl::time lastSpeakingUpdateTime = 0;
-	float64 enter = 0.;
-};
+void GroupCallScheduledLeft::restart() {
+	_datePrecise = computePreciseDate();
+	_timer.cancel();
+	update();
+}
 
-struct GroupCallBar::Userpic {
-	User data;
-	std::pair<uint64, uint64> cacheKey;
-	crl::time speakingStarted = 0;
-	QImage cache;
-	Animations::Simple leftAnimation;
-	Animations::Simple shownAnimation;
-	std::unique_ptr<BlobsAnimation> blobsAnimation;
-	int left = 0;
-	bool positionInited = false;
-	bool topMost = false;
-	bool hiding = false;
-	bool cacheMasked = false;
-};
+rpl::producer<QString> GroupCallScheduledLeft::text(Negative negative) const {
+	return (negative == Negative::Show)
+		? _text.value()
+		: _textNonNegative.value();
+}
+
+rpl::producer<bool> GroupCallScheduledLeft::late() const {
+	return _late.value();
+}
+
+void GroupCallScheduledLeft::update() {
+	const auto now = crl::now();
+	const auto duration = (_datePrecise - now);
+	const auto left = crl::time(std::round(std::abs(duration) / 1000.));
+	const auto late = (duration < 0) && (left > 0);
+	_late = late;
+	constexpr auto kDay = 24 * 60 * 60;
+	if (left >= kDay) {
+		const auto days = (left / kDay);
+		_textNonNegative = tr::lng_group_call_duration_days(
+			tr::now,
+			lt_count,
+			days);
+		_text = late
+			? tr::lng_group_call_duration_days(tr::now, lt_count, -days)
+			: _textNonNegative.current();
+	} else {
+		const auto hours = left / (60 * 60);
+		const auto minutes = (left % (60 * 60)) / 60;
+		const auto seconds = (left % 60);
+		_textNonNegative = (hours > 0)
+			? (u"%1:%2:%3"_q
+				.arg(hours, 2, 10, QChar('0'))
+				.arg(minutes, 2, 10, QChar('0'))
+				.arg(seconds, 2, 10, QChar('0')))
+			: (u"%1:%2"_q
+				.arg(minutes, 2, 10, QChar('0'))
+				.arg(seconds, 2, 10, QChar('0')));
+		_text = (late ? QString(QChar(0x2212)) : QString())
+			+ _textNonNegative.current();
+	}
+	if (left >= kDay) {
+		_timer.callOnce((left % kDay) * crl::time(1000));
+	} else {
+		const auto fraction = (std::abs(duration) + 500) % 1000;
+		if (fraction < 400 || fraction > 600) {
+			const auto next = std::abs(duration) % 1000;
+			_timer.callOnce((duration < 0) ? (1000 - next) : next);
+		} else if (!_timer.isActive()) {
+			_timer.callEach(1000);
+		}
+	}
+}
 
 GroupCallBar::GroupCallBar(
 	not_null<QWidget*> parent,
@@ -93,20 +110,13 @@ GroupCallBar::GroupCallBar(
 	rpl::producer<bool> &&hideBlobs)
 : _wrap(parent, object_ptr<RpWidget>(parent))
 , _inner(_wrap.entity())
-, _join(std::make_unique<RoundButton>(
-	_inner.get(),
-	tr::lng_group_call_join(),
-	st::groupCallTopBarJoin))
 , _shadow(std::make_unique<PlainShadow>(_wrap.parentWidget()))
-, _randomSpeakingTimer([=] { sendRandomLevels(); }) {
+, _userpics(std::make_unique<GroupCallUserpics>(
+		st::historyGroupCallUserpics,
+		std::move(hideBlobs),
+		[=] { updateUserpics(); })) {
 	_wrap.hide(anim::type::instant);
 	_shadow->hide();
-
-	const auto limit = kMaxUserpics;
-	const auto single = st::historyGroupCallUserpicSize;
-	const auto shift = st::historyGroupCallUserpicShift;
-	// + 1 * single for the blobs.
-	_maxUserpicsWidth = 2 * single + (limit - 1) * (single - shift);
 
 	_wrap.entity()->paintRequest(
 	) | rpl::start_with_next([=](QRect clip) {
@@ -122,9 +132,13 @@ GroupCallBar::GroupCallBar(
 		copy
 	) | rpl::start_with_next([=](GroupCallBarContent &&content) {
 		_content = content;
-		updateUserpicsFromContent();
+		_userpics->update(_content.users, !_wrap.isHidden());
 		_inner->update();
+		refreshScheduledProcess();
 	}, lifetime());
+	if (!_open && !_join) {
+		refreshScheduledProcess();
+	}
 
 	std::move(
 		copy
@@ -140,52 +154,59 @@ GroupCallBar::GroupCallBar(
 		_wrap.toggle(false, anim::type::normal);
 	}, lifetime());
 
-	style::PaletteChanged(
-	) | rpl::start_with_next([=] {
-		for (auto &userpic : _userpics) {
-			userpic.cache = QImage();
-		}
-	}, lifetime());
-
-	_speakingAnimation.init([=](crl::time now) {
-		if (const auto &last = _speakingAnimationHideLastTime; (last > 0)
-			&& (now - last >= kBlobsEnterDuration)) {
-			_speakingAnimation.stop();
-		}
-		for (auto &userpic : _userpics) {
-			if (const auto blobs = userpic.blobsAnimation.get()) {
-				blobs->blobs.updateLevel(now - blobs->lastTime);
-				blobs->lastTime = now;
-			}
-		}
-		updateUserpics();
-	});
-
-	rpl::combine(
-		rpl::single(anim::Disabled()) | rpl::then(anim::Disables()),
-		std::move(hideBlobs)
-	) | rpl::start_with_next([=](bool animDisabled, bool deactivated) {
-		const auto hide = animDisabled || deactivated;
-
-		if (!(hide && _speakingAnimationHideLastTime)) {
-			_speakingAnimationHideLastTime = hide ? crl::now() : 0;
-		}
-		_skipLevelUpdate = hide;
-		for (auto &userpic : _userpics) {
-			if (const auto blobs = userpic.blobsAnimation.get()) {
-				blobs->blobs.setLevel(0.);
-			}
-		}
-		if (!hide && !_speakingAnimation.animating()) {
-			_speakingAnimation.start();
-		}
-		_skipLevelUpdate = hide;
-	}, lifetime());
-
 	setupInner();
 }
 
-GroupCallBar::~GroupCallBar() {
+GroupCallBar::~GroupCallBar() = default;
+
+void GroupCallBar::refreshOpenBrush() {
+	Expects(_open != nullptr);
+
+	const auto width = _open->width();
+	if (_openBrushForWidth == width) {
+		return;
+	}
+	auto gradient = QLinearGradient(QPoint(width, 0), QPoint(0, 0));
+	gradient.setStops(QGradientStops{
+		{ 0.0, st::groupCallForceMutedBar1->c },
+		{ .7, st::groupCallForceMutedBar2->c },
+		{ 1.0, st::groupCallForceMutedBar3->c }
+	});
+	_openBrushOverride = QBrush(std::move(gradient));
+	_openBrushForWidth = width;
+	_open->setBrushOverride(_openBrushOverride);
+}
+
+void GroupCallBar::refreshScheduledProcess() {
+	const auto date = _content.scheduleDate;
+	if (!date) {
+		if (_scheduledProcess) {
+			_scheduledProcess = nullptr;
+			_open = nullptr;
+			_openBrushForWidth = 0;
+		}
+		if (!_join) {
+			_join = std::make_unique<RoundButton>(
+				_inner.get(),
+				tr::lng_group_call_join(),
+				st::groupCallTopBarJoin);
+			setupRightButton(_join.get());
+		}
+	} else if (!_scheduledProcess) {
+		_scheduledProcess = std::make_unique<GroupCallScheduledLeft>(date);
+		_join = nullptr;
+		_open = std::make_unique<RoundButton>(
+			_inner.get(),
+			_scheduledProcess->text(GroupCallScheduledLeft::Negative::Show),
+			st::groupCallTopBarOpen);
+		setupRightButton(_open.get());
+		_open->widthValue(
+		) | rpl::start_with_next([=] {
+			refreshOpenBrush();
+		}, _open->lifetime());
+	} else {
+		_scheduledProcess->setDate(date);
+	}
 }
 
 void GroupCallBar::setupInner() {
@@ -214,22 +235,26 @@ void GroupCallBar::setupInner() {
 		return rpl::empty_value();
 	}) | rpl::start_to_stream(_barClicks, _inner->lifetime());
 
-	rpl::combine(
-		_inner->widthValue(),
-		_join->widthValue()
-	) | rpl::start_with_next([=](int outerWidth, int) {
-		// Skip shadow of the bar above.
-		const auto top = (st::historyReplyHeight
-			- st::lineWidth
-			- _join->height()) / 2 + st::lineWidth;
-		_join->moveToRight(top, top, outerWidth);
-	}, _join->lifetime());
-
 	_wrap.geometryValue(
 	) | rpl::start_with_next([=](QRect rect) {
 		updateShadowGeometry(rect);
 		updateControlsGeometry(rect);
 	}, _inner->lifetime());
+}
+
+void GroupCallBar::setupRightButton(not_null<RoundButton*> button) {
+	rpl::combine(
+		_inner->widthValue(),
+		button->widthValue()
+	) | rpl::start_with_next([=](int outerWidth, int) {
+		// Skip shadow of the bar above.
+		const auto top = (st::historyReplyHeight
+			- st::lineWidth
+			- button->height()) / 2 + st::lineWidth;
+		button->moveToRight(top, top, outerWidth);
+	}, button->lifetime());
+
+	button->clicks() | rpl::start_to_stream(_joinClicks, button->lifetime());
 }
 
 void GroupCallBar::paint(Painter &p) {
@@ -239,155 +264,67 @@ void GroupCallBar::paint(Painter &p) {
 	const auto titleTop = st::msgReplyPadding.top();
 	const auto textTop = titleTop + st::msgServiceNameFont->height;
 	const auto width = _inner->width();
+	const auto &font = st::defaultMessageBar.title.font;
 	p.setPen(st::defaultMessageBar.textFg);
-	p.setFont(st::defaultMessageBar.title.font);
-	p.drawTextLeft(left, titleTop, width, tr::lng_group_call_title(tr::now));
+	p.setFont(font);
+
+	const auto available = (_join ? _join->x() : _open->x()) - left;
+	const auto titleWidth = font->width(_content.title);
+	p.drawTextLeft(
+		left,
+		titleTop,
+		width,
+		(!_content.scheduleDate
+			? tr::lng_group_call_title(tr::now)
+			: _content.title.isEmpty()
+			? tr::lng_group_call_scheduled_title(tr::now)
+			: (titleWidth > available)
+			? font->elided(_content.title, available)
+			: _content.title));
 	p.setPen(st::historyStatusFg);
 	p.setFont(st::defaultMessageBar.text.font);
+	const auto when = [&] {
+		if (!_content.scheduleDate) {
+			return QString();
+		}
+		const auto parsed = base::unixtime::parse(_content.scheduleDate);
+		const auto date = parsed.date();
+		const auto time = parsed.time().toString(
+			QLocale::system().timeFormat(QLocale::ShortFormat));
+		const auto today = QDate::currentDate();
+		if (date == today) {
+			return tr::lng_group_call_starts_today(tr::now, lt_time, time);
+		} else if (date == today.addDays(1)) {
+			return tr::lng_group_call_starts_tomorrow(
+				tr::now,
+				lt_time,
+				time);
+		} else {
+			return tr::lng_group_call_starts_date(
+				tr::now,
+				lt_date,
+				langDayOfMonthFull(date),
+				lt_time,
+				time);
+		}
+	}();
 	p.drawTextLeft(
 		left,
 		textTop,
 		width,
-		(_content.count > 0
+		(_content.scheduleDate
+			? (_content.title.isEmpty()
+				? tr::lng_group_call_starts_short
+				: tr::lng_group_call_starts)(tr::now, lt_when, when)
+			: _content.count > 0
 			? tr::lng_group_call_members(tr::now, lt_count, _content.count)
 			: tr::lng_group_call_no_members(tr::now)));
 
+	const auto size = st::historyGroupCallUserpics.size;
 	// Skip shadow of the bar above.
-	paintUserpics(p);
-}
-
-void GroupCallBar::paintUserpics(Painter &p) {
-	const auto top = (st::historyReplyHeight
-		- st::lineWidth
-		- st::historyGroupCallUserpicSize) / 2 + st::lineWidth;
-	const auto middle = _inner->width()  / 2;
-	const auto size = st::historyGroupCallUserpicSize;
-	const auto factor = style::DevicePixelRatio();
-	const auto &minScale = kUserpicMinScale;
-	for (auto &userpic : ranges::view::reverse(_userpics)) {
-		const auto shown = userpic.shownAnimation.value(
-			userpic.hiding ? 0. : 1.);
-		if (shown == 0.) {
-			continue;
-		}
-		validateUserpicCache(userpic);
-		p.setOpacity(shown);
-		const auto left = middle + userpic.leftAnimation.value(userpic.left);
-		const auto blobs = userpic.blobsAnimation.get();
-		const auto shownScale = 0.5 + shown / 2.;
-		const auto scale = shownScale * (!blobs
-			? 1.
-			: (minScale
-				+ (1. - minScale) * (_speakingAnimationHideLastTime
-					? (1. - blobs->blobs.currentLevel())
-					: blobs->blobs.currentLevel())));
-		if (blobs) {
-			auto hq = PainterHighQualityEnabler(p);
-
-			const auto shift = QPointF(left + size / 2., top + size / 2.);
-			p.translate(shift);
-			blobs->blobs.paint(p, st::windowActiveTextFg);
-			p.translate(-shift);
-			p.setOpacity(1.);
-		}
-		if (std::abs(scale - 1.) < 0.001) {
-			const auto skip = ((kWideScale - 1) / 2) * size * factor;
-			p.drawImage(
-				QRect(left, top, size, size),
-				userpic.cache,
-				QRect(skip, skip, size * factor, size * factor));
-		} else {
-			auto hq = PainterHighQualityEnabler(p);
-
-			auto target = QRect(
-				left + (1 - kWideScale) / 2 * size,
-				top + (1 - kWideScale) / 2 * size,
-				kWideScale * size,
-				kWideScale * size);
-			auto shrink = anim::interpolate(
-				(1 - kWideScale) / 2 * size,
-				0,
-				scale);
-			auto margins = QMargins(shrink, shrink, shrink, shrink);
-			p.drawImage(target.marginsAdded(margins), userpic.cache);
-		}
-	}
-	p.setOpacity(1.);
-
-	const auto hidden = [](const Userpic &userpic) {
-		return userpic.hiding && !userpic.shownAnimation.animating();
-	};
-	_userpics.erase(ranges::remove_if(_userpics, hidden), end(_userpics));
-}
-
-bool GroupCallBar::needUserpicCacheRefresh(Userpic &userpic) {
-	if (userpic.cache.isNull()) {
-		return true;
-	} else if (userpic.hiding) {
-		return false;
-	} else if (userpic.cacheKey != userpic.data.userpicKey) {
-		return true;
-	}
-	const auto shouldBeMasked = !userpic.topMost;
-	if (userpic.cacheMasked == shouldBeMasked || !shouldBeMasked) {
-		return true;
-	}
-	return !userpic.leftAnimation.animating();
-}
-
-void GroupCallBar::ensureBlobsAnimation(Userpic &userpic) {
-	if (userpic.blobsAnimation) {
-		return;
-	}
-	userpic.blobsAnimation = std::make_unique<BlobsAnimation>(
-		Blobs() | ranges::to_vector,
-		kLevelDuration,
-		kMaxLevel);
-	userpic.blobsAnimation->lastTime = crl::now();
-}
-
-void GroupCallBar::sendRandomLevels() {
-	if (_skipLevelUpdate) {
-		return;
-	}
-	for (auto &userpic : _userpics) {
-		if (const auto blobs = userpic.blobsAnimation.get()) {
-			const auto value = 30 + (openssl::RandomValue<uint32>() % 70);
-			userpic.blobsAnimation->blobs.setLevel(float64(value) / 100.);
-		}
-	}
-}
-
-void GroupCallBar::validateUserpicCache(Userpic &userpic) {
-	if (!needUserpicCacheRefresh(userpic)) {
-		return;
-	}
-	const auto factor = style::DevicePixelRatio();
-	const auto size = st::historyGroupCallUserpicSize;
-	const auto shift = st::historyGroupCallUserpicShift;
-	const auto full = QSize(size, size) * kWideScale * factor;
-	if (userpic.cache.isNull()) {
-		userpic.cache = QImage(full, QImage::Format_ARGB32_Premultiplied);
-		userpic.cache.setDevicePixelRatio(factor);
-	}
-	userpic.cacheKey = userpic.data.userpicKey;
-	userpic.cacheMasked = !userpic.topMost;
-	userpic.cache.fill(Qt::transparent);
-	{
-		Painter p(&userpic.cache);
-		const auto skip = (kWideScale - 1) / 2 * size;
-		p.drawImage(skip, skip, userpic.data.userpic);
-
-		if (userpic.cacheMasked) {
-			auto hq = PainterHighQualityEnabler(p);
-			auto pen = QPen(Qt::transparent);
-			pen.setWidth(st::historyGroupCallUserpicStroke);
-			p.setCompositionMode(QPainter::CompositionMode_Source);
-			p.setBrush(Qt::transparent);
-			p.setPen(pen);
-			p.drawEllipse(skip - size + shift, skip, size, size);
-		}
-	}
+	const auto top = (st::historyReplyHeight - st::lineWidth - size) / 2
+		+ st::lineWidth;
+	_userpics->paint(p, _inner->width() / 2, top, size);
 }
 
 void GroupCallBar::updateControlsGeometry(QRect wrapGeometry) {
@@ -413,127 +350,14 @@ void GroupCallBar::updateShadowGeometry(QRect wrapGeometry) {
 		: regular);
 }
 
-void GroupCallBar::updateUserpicsFromContent() {
-	const auto idFromUserpic = [](const Userpic &userpic) {
-		return userpic.data.id;
-	};
-
-	// Use "topMost" as "willBeHidden" flag.
-	for (auto &userpic : _userpics) {
-		userpic.topMost = true;
-	}
-	for (const auto &user : _content.users) {
-		const auto i = ranges::find(_userpics, user.id, idFromUserpic);
-		if (i == end(_userpics)) {
-			_userpics.push_back(Userpic{ user });
-			toggleUserpic(_userpics.back(), true);
-			continue;
-		}
-		i->topMost = false;
-
-		if (i->hiding) {
-			toggleUserpic(*i, true);
-		}
-		i->data = user;
-
-		// Put this one after the last we are not hiding.
-		for (auto j = end(_userpics) - 1; j != i; --j) {
-			if (!j->topMost) {
-				ranges::rotate(i, i + 1, j + 1);
-				break;
-			}
-		}
-	}
-
-	// Hide the ones that "willBeHidden" (currently having "topMost" flag).
-	// Set correct real values of "topMost" flag.
-	const auto userpicsBegin = begin(_userpics);
-	const auto userpicsEnd = end(_userpics);
-	auto markedTopMost = userpicsEnd;
-	auto hasBlobs = false;
-	for (auto i = userpicsBegin; i != userpicsEnd; ++i) {
-		auto &userpic = *i;
-		if (userpic.data.speaking) {
-			ensureBlobsAnimation(userpic);
-			hasBlobs = true;
-		} else {
-			userpic.blobsAnimation = nullptr;
-		}
-		if (userpic.topMost) {
-			toggleUserpic(userpic, false);
-			userpic.topMost = false;
-		} else if (markedTopMost == userpicsEnd) {
-			userpic.topMost = true;
-			markedTopMost = i;
-		}
-	}
-	if (markedTopMost != userpicsEnd && markedTopMost != userpicsBegin) {
-		// Bring the topMost userpic to the very beginning, above all hiding.
-		std::rotate(userpicsBegin, markedTopMost, markedTopMost + 1);
-	}
-	updateUserpicsPositions();
-
-	if (!hasBlobs) {
-		_randomSpeakingTimer.cancel();
-		_speakingAnimation.stop();
-	} else if (!_randomSpeakingTimer.isActive()) {
-		_randomSpeakingTimer.callEach(kSendRandomLevelInterval);
-		_speakingAnimation.start();
-	}
-
-	if (_wrap.isHidden()) {
-		for (auto &userpic : _userpics) {
-			userpic.shownAnimation.stop();
-			userpic.leftAnimation.stop();
-		}
-	}
-}
-
-void GroupCallBar::toggleUserpic(Userpic &userpic, bool shown) {
-	userpic.hiding = !shown;
-	userpic.shownAnimation.start(
-		[=] { updateUserpics(); },
-		shown ? 0. : 1.,
-		shown ? 1. : 0.,
-		kDuration);
-}
-
-void GroupCallBar::updateUserpicsPositions() {
-	const auto shownCount = ranges::count(_userpics, false, &Userpic::hiding);
-	if (!shownCount) {
-		return;
-	}
-	const auto single = st::historyGroupCallUserpicSize;
-	const auto shift = st::historyGroupCallUserpicShift;
-	// + 1 * single for the blobs.
-	const auto fullWidth = single + (shownCount - 1) * (single - shift);
-	auto left = (-fullWidth / 2);
-	for (auto &userpic : _userpics) {
-		if (userpic.hiding) {
-			continue;
-		}
-		if (!userpic.positionInited) {
-			userpic.positionInited = true;
-			userpic.left = left;
-		} else if (userpic.left != left) {
-			userpic.leftAnimation.start(
-				[=] { updateUserpics(); },
-				userpic.left,
-				left,
-				kDuration);
-			userpic.left = left;
-		}
-		left += (single - shift);
-	}
-}
-
 void GroupCallBar::updateUserpics() {
 	const auto widget = _wrap.entity();
 	const auto middle = widget->width() / 2;
-	_wrap.entity()->update(
-		(middle - _maxUserpicsWidth / 2),
+	const auto width = _userpics->maxWidth();
+	widget->update(
+		(middle - width / 2),
 		0,
-		_maxUserpicsWidth,
+		width,
 		widget->height());
 }
 
@@ -592,7 +416,7 @@ rpl::producer<> GroupCallBar::barClicks() const {
 }
 
 rpl::producer<> GroupCallBar::joinClicks() const {
-	return _join->clicks() | rpl::to_empty;
+	return _joinClicks.events() | rpl::to_empty;
 }
 
 } // namespace Ui

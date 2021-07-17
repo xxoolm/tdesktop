@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 
 struct WebPageData;
+class VoiceSeekClickHandler;
 
 namespace Data {
 class Session;
@@ -71,7 +72,7 @@ struct HistoryMessageEdited : public RuntimeComponent<HistoryMessageEdited, Hist
 };
 
 struct HiddenSenderInfo {
-	explicit HiddenSenderInfo(const QString &name);
+	HiddenSenderInfo(const QString &name, bool external);
 
 	QString name;
 	QString firstName;
@@ -101,6 +102,7 @@ struct HistoryMessageForwarded : public RuntimeComponent<HistoryMessageForwarded
 
 	PeerData *savedFromPeer = nullptr;
 	MsgId savedFromMsgId = 0;
+	bool imported = false;
 };
 
 struct HistoryMessageReply : public RuntimeComponent<HistoryMessageReply, HistoryItem> {
@@ -235,6 +237,7 @@ struct HistoryMessageReplyMarkup : public RuntimeComponent<HistoryMessageReplyMa
 
 	std::vector<std::vector<Button>> rows;
 	MTPDreplyKeyboardMarkup::Flags flags = 0;
+	QString placeholder;
 
 	std::unique_ptr<ReplyKeyboard> inlineKeyboard;
 
@@ -251,9 +254,7 @@ public:
 		int column,
 		FullMsgId context);
 
-	QString tooltip() const override {
-		return _fullDisplayed ? QString() : buttonText();
-	}
+	QString tooltip() const override;
 
 	void setFullDisplayed(bool full) {
 		_fullDisplayed = full;
@@ -268,6 +269,8 @@ public:
 	// Note: it is possible that we will point to the different button
 	// than the one was used when constructing the handler, but not a big deal.
 	const HistoryMessageMarkupButton *getButton() const;
+
+	const HistoryMessageMarkupButton *getUrlButton() const;
 
 	// We hold only FullMsgId, not HistoryItem*, because all click handlers
 	// are activated async and the item may be already destroyed.

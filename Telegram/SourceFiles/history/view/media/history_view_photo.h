@@ -68,6 +68,7 @@ public:
 		const QRect &geometry,
 		RectParts sides,
 		RectParts corners,
+		float64 highlightOpacity,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const override;
 	TextState getStateGrouped(
@@ -100,6 +101,8 @@ protected:
 
 private:
 	struct Streamed;
+
+	void showPhoto(FullMsgId id);
 
 	void create(FullMsgId contextId, PeerData *chat = nullptr);
 

@@ -322,7 +322,8 @@ AdminLog::OwnedItem GenerateContactItem(
 		MTP_string(),
 		MTP_long(0),
 		//MTPMessageReactions(),
-		MTPVector<MTPRestrictionReason>());
+		MTPVector<MTPRestrictionReason>(),
+		MTPint()); // ttl_period
 	const auto item = history->makeMessage(
 		message.c_message(),
 		MTPDmessage_ClientFlag::f_fake_history_item);
@@ -406,9 +407,7 @@ void Autocomplete::setupContent() {
 			rpl::single(qsl("Search for templates"))), // #TODO hard_lang
 		st::autocompleteSearchPadding);
 	const auto input = inputWrap->entity();
-	const auto scroll = Ui::CreateChild<Ui::ScrollArea>(
-		this,
-		st::mentionScroll);
+	const auto scroll = Ui::CreateChild<Ui::ScrollArea>(this);
 
 	const auto inner = scroll->setOwnedWidget(object_ptr<Inner>(scroll));
 
@@ -481,7 +480,6 @@ void Autocomplete::submitValue(const QString &value) {
 	if (value.startsWith(prefix)) {
 		const auto line = value.indexOf('\n');
 		const auto text = (line > 0) ? value.mid(line + 1) : QString();
-		const auto commented = !text.isEmpty();
 		const auto contact = value.mid(
 			prefix.size(),
 			(line > 0) ? (line - prefix.size()) : -1);
@@ -509,7 +507,7 @@ ConfirmContactBox::ConfirmContactBox(
 	not_null<History*> history,
 	const Contact &data,
 	Fn<void(Qt::KeyboardModifiers)> submit)
-: SimpleElementDelegate(controller)
+: SimpleElementDelegate(controller, [=] { update(); })
 , _comment(GenerateCommentItem(this, history, data))
 , _contact(GenerateContactItem(this, history, data))
 , _submit(submit) {
@@ -528,7 +526,7 @@ void ConfirmContactBox::prepare() {
 	_contact->initDimensions();
 	accumulate_max(maxWidth, _contact->maxWidth());
 	maxWidth += st::boxPadding.left() + st::boxPadding.right();
-	const auto width = snap(maxWidth, st::boxWidth, st::boxWideWidth);
+	const auto width = std::clamp(maxWidth, st::boxWidth, st::boxWideWidth);
 	const auto available = width
 		- st::boxPadding.left()
 		- st::boxPadding.right();

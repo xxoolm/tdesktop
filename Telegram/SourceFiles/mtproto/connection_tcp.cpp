@@ -35,7 +35,6 @@ public:
 	virtual uint32 id() const = 0;
 	virtual bool supportsArbitraryLength() const = 0;
 
-	virtual bool requiresExtendedPadding() const = 0;
 	virtual void prepareKey(bytes::span key, bytes::const_span source) = 0;
 	virtual bytes::span finalizePacket(mtpBuffer &buffer) = 0;
 
@@ -58,7 +57,6 @@ public:
 	uint32 id() const override;
 	bool supportsArbitraryLength() const override;
 
-	bool requiresExtendedPadding() const override;
 	void prepareKey(bytes::span key, bytes::const_span source) override;
 	bytes::span finalizePacket(mtpBuffer &buffer) override;
 
@@ -72,10 +70,6 @@ uint32 TcpConnection::Protocol::Version0::id() const {
 }
 
 bool TcpConnection::Protocol::Version0::supportsArbitraryLength() const {
-	return false;
-}
-
-bool TcpConnection::Protocol::Version0::requiresExtendedPadding() const {
 	return false;
 }
 
@@ -142,7 +136,6 @@ class TcpConnection::Protocol::Version1 : public Version0 {
 public:
 	explicit Version1(bytes::vector &&secret);
 
-	bool requiresExtendedPadding() const override;
 	void prepareKey(bytes::span key, bytes::const_span source) override;
 
 private:
@@ -152,10 +145,6 @@ private:
 
 TcpConnection::Protocol::Version1::Version1(bytes::vector &&secret)
 : _secret(std::move(secret)) {
-}
-
-bool TcpConnection::Protocol::Version1::requiresExtendedPadding() const {
-	return true;
 }
 
 void TcpConnection::Protocol::Version1::prepareKey(
@@ -192,11 +181,11 @@ bytes::span TcpConnection::Protocol::VersionD::finalizePacket(
 	Expects(buffer.size() > 2 && buffer.size() < 0x1000003U);
 
 	const auto intsSize = uint32(buffer.size() - 2);
-	const auto padding = rand_value<uint32>() & 0x0F;
+	const auto padding = openssl::RandomValue<uint32>() & 0x0F;
 	const auto bytesSize = intsSize * sizeof(mtpPrime) + padding;
 	buffer[1] = bytesSize;
 	for (auto added = 0; added < padding; added += 4) {
-		buffer.push_back(rand_value<mtpPrime>());
+		buffer.push_back(openssl::RandomValue<mtpPrime>());
 	}
 
 	return bytes::make_span(buffer).subspan(4, 4 + bytesSize);
@@ -244,7 +233,7 @@ TcpConnection::TcpConnection(
 	const ProxyData &proxy)
 : AbstractConnection(thread, proxy)
 , _instance(instance)
-, _checkNonce(rand_value<MTPint128>()) {
+, _checkNonce(openssl::RandomValue<MTPint128>()) {
 }
 
 ConnectionPointer TcpConnection::clone(const ProxyData &proxy) {
@@ -284,7 +273,7 @@ void TcpConnection::socketRead() {
 
 	if (!_socket || !_socket->isConnected()) {
 		LOG(("MTP Error: Socket not connected in socketRead()"));
-		emit error(kErrorCodeOther);
+		error(kErrorCodeOther);
 		return;
 	}
 
@@ -323,7 +312,7 @@ void TcpConnection::socketRead() {
 					TCP_LOG(("TCP Info: not enough %1 for packet! read %2"
 						).arg(_leftBytes
 						).arg(_readBytes));
-					emit receivedSome();
+					receivedSome();
 				}
 			} else {
 				auto available = full.subspan(0, _readBytes);
@@ -336,7 +325,7 @@ void TcpConnection::socketRead() {
 					} else if (packetSize <= 0) {
 						LOG(("TCP Error: bad packet size in 4 bytes: %1"
 							).arg(packetSize));
-						emit error(kErrorCodeOther);
+						error(kErrorCodeOther);
 						return;
 					} else if (available.size() >= packetSize) {
 						socketPacket(available.subspan(0, packetSize));
@@ -361,14 +350,14 @@ void TcpConnection::socketRead() {
 							).arg(_leftBytes
 							).arg(packetSize
 							).arg(available.size()));
-						emit receivedSome();
+						receivedSome();
 						break;
 					}
 				}
 			}
 		} else if (readCount < 0) {
 			LOG(("TCP Error: socket read return %1").arg(readCount));
-			emit error(kErrorCodeOther);
+			error(kErrorCodeOther);
 			return;
 		} else {
 			TCP_LOG(("TCP Info: no bytes read, but bytes available was true..."));
@@ -421,14 +410,8 @@ void TcpConnection::socketConnected() {
 
 void TcpConnection::socketDisconnected() {
 	if (_status == Status::Waiting || _status == Status::Ready) {
-		emit disconnected();
+		disconnected();
 	}
-}
-
-bool TcpConnection::requiresExtendedPadding() const {
-	Expects(_protocol != nullptr);
-
-	return _protocol->requiresExtendedPadding();
 }
 
 void TcpConnection::sendData(mtpBuffer &&buffer) {
@@ -512,7 +495,8 @@ void TcpConnection::connectToServer(
 		const QString &address,
 		int port,
 		const bytes::vector &protocolSecret,
-		int16 protocolDcId) {
+		int16 protocolDcId,
+		bool protocolForFiles) {
 	Expects(_address.isEmpty());
 	Expects(_port == 0);
 	Expects(_protocol == nullptr);
@@ -543,7 +527,8 @@ void TcpConnection::connectToServer(
 	_socket = AbstractSocket::Create(
 		thread(),
 		secret,
-		ToNetworkProxy(_proxy));
+		ToNetworkProxy(_proxy),
+		protocolForFiles);
 	_protocolDcId = protocolDcId;
 
 	_socket->connected(
@@ -568,7 +553,7 @@ void TcpConnection::connectToServer(
 
 	_socket->syncTimeRequests(
 	) | rpl::start_with_next([=] {
-		emit syncTimeRequest();
+		syncTimeRequest();
 	}, _lifetime);
 
 	_socket->connectToHost(_address, _port);
@@ -589,7 +574,7 @@ void TcpConnection::socketPacket(bytes::const_span bytes) {
 	const auto data = parsePacket(bytes);
 	if (data.size() == 1) {
 		if (data[0] != 0) {
-			emit error(data[0]);
+			error(data[0]);
 		} else {
 			// nop
 		}
@@ -597,7 +582,7 @@ void TcpConnection::socketPacket(bytes::const_span bytes) {
 		// new quickack?..
 	} else if (_status == Status::Ready) {
 		_receivedQueue.push_back(data);
-		emit receivedData();
+		receivedData();
 	} else if (_status == Status::Waiting) {
 		if (const auto res_pq = readPQFakeReply(data)) {
 			const auto &data = res_pq->c_resPQ();
@@ -606,16 +591,16 @@ void TcpConnection::socketPacket(bytes::const_span bytes) {
 				_status = Status::Ready;
 				_connectedLifetime.destroy();
 				_pingTime = (crl::now() - _pingTime);
-				emit connected();
+				connected();
 			} else {
 				DEBUG_LOG(("Connection Error: "
 					"Wrong nonce received in TCP fake pq-responce"));
-				emit error(kErrorCodeOther);
+				error(kErrorCodeOther);
 			}
 		} else {
 			DEBUG_LOG(("Connection Error: "
 				"Could not parse TCP fake pq-responce"));
-			emit error(kErrorCodeOther);
+			error(kErrorCodeOther);
 		}
 	}
 }
@@ -660,7 +645,7 @@ void TcpConnection::socketError() {
 		return;
 	}
 
-	emit error(kErrorCodeOther);
+	error(kErrorCodeOther);
 }
 
 TcpConnection::~TcpConnection() = default;

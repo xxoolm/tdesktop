@@ -216,7 +216,6 @@ std::pair<Languages, Languages> PrepareLists() {
 					Lang::GetInstance().nativeName()
 				};
 			};
-			const auto i = ranges::find(official, current, projId);
 			recent.insert(begin(recent), generate());
 		}
 	}
@@ -424,11 +423,11 @@ void Rows::remove(not_null<Row*> row) {
 
 void Rows::restore(not_null<Row*> row) {
 	row->removed = false;
-	Local::saveRecentLanguages(ranges::view::all(
+	Local::saveRecentLanguages(ranges::views::all(
 		_rows
-	) | ranges::view::filter([](const Row &row) {
+	) | ranges::views::filter([](const Row &row) {
 		return !row.removed;
-	}) | ranges::view::transform([](const Row &row) {
+	}) | ranges::views::transform([](const Row &row) {
 		return row.data;
 	}) | ranges::to_vector);
 }
@@ -464,7 +463,6 @@ void Rows::showMenu(int index) {
 			Fn<void()> callback) {
 		return _menu->addAction(text, std::move(callback));
 	};
-	const auto id = row->data.id;
 	if (canShare(row)) {
 		addAction(tr::lng_proxy_edit_share(tr::now), [=] { share(row); });
 	}
@@ -1167,15 +1165,19 @@ base::binary_guard LanguageBox::Show() {
 	if (manager.languageList().empty()) {
 		auto guard = std::make_shared<base::binary_guard>(
 			result.make_guard());
-		auto alive = std::make_shared<std::unique_ptr<base::Subscription>>(
-			std::make_unique<base::Subscription>());
-		**alive = manager.languageListChanged().add_subscription([=] {
+		auto lifetime = std::make_shared<rpl::lifetime>();
+		manager.languageListChanged(
+		) | rpl::take(
+			1
+		) | rpl::start_with_next([=]() mutable {
 			const auto show = guard->alive();
-			*alive = nullptr;
+			if (lifetime) {
+				base::take(lifetime)->destroy();
+			}
 			if (show) {
 				Ui::show(Box<LanguageBox>());
 			}
-		});
+		}, *lifetime);
 	} else {
 		Ui::show(Box<LanguageBox>());
 	}

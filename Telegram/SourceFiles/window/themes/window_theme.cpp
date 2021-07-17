@@ -11,12 +11,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/themes/window_themes_embedded.h"
 #include "window/themes/window_theme_editor.h"
 #include "window/window_controller.h"
+#include "platform/platform_specific.h"
 #include "mainwidget.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "storage/localstorage.h"
 #include "storage/localimageloader.h"
 #include "storage/file_upload.h"
+#include "base/openssl_help.h"
 #include "base/parse_helper.h"
 #include "base/zlib_help.h"
 #include "base/unixtime.h"
@@ -25,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_account.h" // Account::local.
 #include "main/main_domain.h" // Domain::activeSessionValue.
 #include "ui/image/image.h"
+#include "ui/ui_utility.h"
 #include "boxes/confirm_box.h"
 #include "boxes/background_box.h"
 #include "core/application.h"
@@ -404,9 +407,9 @@ bool InitializeFromCache(
 
 bool InitializeFromSaved(Saved &&saved) {
 	if (saved.object.content.size() < 4) {
-		LOG(("Theme Error: Could not load theme from '%1' (%2)"
-			).arg(saved.object.pathRelative
-			).arg(saved.object.pathAbsolute));
+		LOG(("Theme Error: Could not load theme from '%1' (%2)").arg(
+			saved.object.pathRelative,
+			saved.object.pathAbsolute));
 		return false;
 	}
 
@@ -459,7 +462,6 @@ SendMediaReady PrepareWallPaper(MTP::DcId dcId, const QImage &image) {
 	const auto push = [&](const char *type, QImage &&image) {
 		sizes.push_back(MTP_photoSize(
 			MTP_string(type),
-			MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)),
 			MTP_int(image.width()),
 			MTP_int(image.height()), MTP_int(0)));
 		thumbnails.emplace(
@@ -475,7 +477,7 @@ SendMediaReady PrepareWallPaper(MTP::DcId dcId, const QImage &image) {
 	attributes.push_back(MTP_documentAttributeImageSize(
 		MTP_int(image.width()),
 		MTP_int(image.height())));
-	const auto id = rand_value<DocumentId>();
+	const auto id = openssl::RandomValue<DocumentId>();
 	const auto document = MTP_document(
 		MTP_flags(0),
 		MTP_long(id),
@@ -549,11 +551,12 @@ void ChatBackground::initialRead() {
 void ChatBackground::start() {
 	saveAdjustableColors();
 
-	subscribe(this, [=](const BackgroundUpdate &update) {
+	_updates.events(
+	) | rpl::start_with_next([=](const BackgroundUpdate &update) {
 		if (update.paletteChanged()) {
 			style::NotifyPaletteChanged();
 		}
-	});
+	}, _lifetime);
 
 	initialRead();
 
@@ -618,7 +621,7 @@ void ChatBackground::checkUploadWallPaper() {
 			if (const auto paper = Data::WallPaper::Create(_session, result)) {
 				setPaper(*paper);
 				writeNewBackgroundSettings();
-				notify(BackgroundUpdate(BackgroundUpdate::Type::New, tile()));
+				_updates.fire({ BackgroundUpdate::Type::New, tile() });
 			}
 		}).send();
 	});
@@ -703,10 +706,10 @@ void ChatBackground::set(const Data::WallPaper &paper, QImage image) {
 			&& !_pixmap.isNull()
 			&& !_pixmapForTiled.isNull()));
 
-	notify(BackgroundUpdate(BackgroundUpdate::Type::New, tile()));
+	_updates.fire({ BackgroundUpdate::Type::New, tile() }); // delayed?
 	if (needResetAdjustable) {
-		notify(BackgroundUpdate(BackgroundUpdate::Type::TestingTheme, tile()), true);
-		notify(BackgroundUpdate(BackgroundUpdate::Type::ApplyingTheme, tile()), true);
+		_updates.fire({ BackgroundUpdate::Type::TestingTheme, tile() });
+		_updates.fire({ BackgroundUpdate::Type::ApplyingTheme, tile() });
 	}
 	checkUploadWallPaper();
 }
@@ -753,10 +756,10 @@ void ChatBackground::preparePixmaps(QImage image) {
 				imageForTiledBytes += imageForTiled.bytesPerLine() - (repeatTimesX * bytesInLine);
 			}
 		}
-		_pixmapForTiled = App::pixmapFromImageInPlace(std::move(imageForTiled));
+		_pixmapForTiled = Ui::PixmapFromImage(std::move(imageForTiled));
 	}
 	_isMonoColorImage = CalculateIsMonoColorImage(image);
-	_pixmap = App::pixmapFromImageInPlace(std::move(image));
+	_pixmap = Ui::PixmapFromImage(std::move(image));
 	if (!isSmallForTiled) {
 		_pixmapForTiled = _pixmap;
 	}
@@ -881,7 +884,7 @@ void ChatBackground::setTile(bool tile) {
 			&& !Data::details::IsTestingDefaultWallPaper(_paper)) {
 			Local::writeSettings();
 		}
-		notify(BackgroundUpdate(BackgroundUpdate::Type::Changed, tile));
+		_updates.fire({ BackgroundUpdate::Type::Changed, tile }); // delayed?
 	}
 }
 
@@ -925,8 +928,8 @@ void ChatBackground::reset() {
 	} else {
 		set(Data::ThemeWallPaper());
 		restoreAdjustableColors();
-		notify(BackgroundUpdate(BackgroundUpdate::Type::TestingTheme, tile()), true);
-		notify(BackgroundUpdate(BackgroundUpdate::Type::ApplyingTheme, tile()), true);
+		_updates.fire({ BackgroundUpdate::Type::TestingTheme, tile() });
+		_updates.fire({ BackgroundUpdate::Type::ApplyingTheme, tile() });
 	}
 	writeNewBackgroundSettings();
 }
@@ -988,7 +991,7 @@ void ChatBackground::setTestingTheme(Instance &&theme) {
 		// Apply current background image so that service bg colors are recounted.
 		set(_paper, std::move(_original));
 	}
-	notify(BackgroundUpdate(BackgroundUpdate::Type::TestingTheme, tile()), true);
+	_updates.fire({ BackgroundUpdate::Type::TestingTheme, tile() });
 }
 
 void ChatBackground::setTestingDefaultTheme() {
@@ -998,7 +1001,7 @@ void ChatBackground::setTestingDefaultTheme() {
 	saveForRevert();
 	set(Data::details::TestingDefaultWallPaper());
 	setTile(false);
-	notify(BackgroundUpdate(BackgroundUpdate::Type::TestingTheme, tile()), true);
+	_updates.fire({ BackgroundUpdate::Type::TestingTheme, tile() });
 }
 
 void ChatBackground::keepApplied(const Object &object, bool write) {
@@ -1025,7 +1028,7 @@ void ChatBackground::keepApplied(const Object &object, bool write) {
 			writeNewBackgroundSettings();
 		}
 	}
-	notify(BackgroundUpdate(BackgroundUpdate::Type::ApplyingTheme, tile()), true);
+	_updates.fire({ BackgroundUpdate::Type::ApplyingTheme, tile() });
 }
 
 bool ChatBackground::isNonDefaultThemeOrBackground() {
@@ -1066,7 +1069,15 @@ void ChatBackground::revert() {
 		// Apply current background image so that service bg colors are recounted.
 		set(_paper, std::move(_original));
 	}
-	notify(BackgroundUpdate(BackgroundUpdate::Type::RevertingTheme, tile()), true);
+	_updates.fire({ BackgroundUpdate::Type::RevertingTheme, tile() });
+}
+
+void ChatBackground::appliedEditedPalette() {
+	_updates.fire({ BackgroundUpdate::Type::ApplyingEdit, tile() });
+}
+
+void ChatBackground::downloadingStarted(bool tile) {
+	_updates.fire({ BackgroundUpdate::Type::Start, tile });
 }
 
 void ChatBackground::setNightModeValue(bool nightMode) {
@@ -1223,7 +1234,7 @@ bool ApplyEditedPalette(const QByteArray &content) {
 		return false;
 	}
 	style::main_palette::apply(out.palette);
-	Background()->notify(BackgroundUpdate(BackgroundUpdate::Type::ApplyingEdit, Background()->tile()), true);
+	Background()->appliedEditedPalette();
 	return true;
 }
 
@@ -1365,7 +1376,6 @@ QColor CountAverageColor(const QImage &image) {
 	Expects(image.format() == QImage::Format_ARGB32_Premultiplied);
 
 	uint64 components[3] = { 0 };
-	uint64 componentsScroll[3] = { 0 };
 	const auto w = image.width();
 	const auto h = image.height();
 	const auto size = w * h;

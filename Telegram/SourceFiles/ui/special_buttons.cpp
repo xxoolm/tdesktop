@@ -27,21 +27,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history.h"
 #include "core/file_utilities.h"
 #include "core/application.h"
-#include "boxes/photo_crop_box.h"
 #include "boxes/confirm_box.h"
+#include "editor/photo_editor_layer_widget.h"
 #include "media/streaming/media_streaming_instance.h"
 #include "media/streaming/media_streaming_player.h"
 #include "media/streaming/media_streaming_document.h"
+#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
 #include "facades.h"
-#include "app.h"
 
 namespace Ui {
 namespace {
+
+constexpr auto kAnimationDuration = crl::time(120);
 
 QString CropTitle(not_null<PeerData*> peer) {
 	if (peer->isChat() || peer->isMegagroup()) {
@@ -63,76 +65,8 @@ QPixmap CreateSquarePixmap(int width, Callback &&paintCallback) {
 		Painter p(&image);
 		paintCallback(p);
 	}
-	return App::pixmapFromImageInPlace(std::move(image));
+	return Ui::PixmapFromImage(std::move(image));
 };
-
-template <typename Callback>
-void SuggestPhoto(
-		const QImage &image,
-		const QString &title,
-		Callback &&callback) {
-	auto badAspect = [](int a, int b) {
-		return (a >= 10 * b);
-	};
-	if (image.isNull()
-		|| badAspect(image.width(), image.height())
-		|| badAspect(image.height(), image.width())) {
-		Ui::show(
-			Box<InformBox>(tr::lng_bad_photo(tr::now)),
-			Ui::LayerOption::KeepOther);
-		return;
-	}
-
-	const auto box = Ui::show(
-		Box<PhotoCropBox>(image, title),
-		Ui::LayerOption::KeepOther);
-	box->ready(
-	) | rpl::start_with_next(
-		std::forward<Callback>(callback),
-		box->lifetime());
-}
-
-template <typename Callback>
-void SuggestPhotoFile(
-		const FileDialog::OpenResult &result,
-		const QString &title,
-		Callback &&callback) {
-	if (result.paths.isEmpty() && result.remoteContent.isEmpty()) {
-		return;
-	}
-
-	auto image = [&] {
-		if (!result.remoteContent.isEmpty()) {
-			return App::readImage(result.remoteContent);
-		} else if (!result.paths.isEmpty()) {
-			return App::readImage(result.paths.front());
-		}
-		return QImage();
-	}();
-	SuggestPhoto(
-		image,
-		title,
-		std::forward<Callback>(callback));
-}
-
-template <typename Callback>
-void ShowChoosePhotoBox(
-		QPointer<QWidget> parent,
-		const QString &title,
-		Callback &&callback) {
-	auto filter = FileDialog::ImagesOrAllFilter();
-	auto handleChosenPhoto = [
-		title,
-		callback = std::forward<Callback>(callback)
-	](auto &&result) mutable {
-		SuggestPhotoFile(result, title, std::move(callback));
-	};
-	FileDialog::GetOpenPath(
-		parent,
-		tr::lng_choose_image(tr::now),
-		filter,
-		std::move(handleChosenPhoto));
-}
 
 } // namespace
 
@@ -181,11 +115,33 @@ void HistoryDownButton::setUnreadCount(int unreadCount) {
 
 UserpicButton::UserpicButton(
 	QWidget *parent,
+	not_null<Window::Controller*> window,
+	not_null<PeerData*> peer,
+	Role role,
+	const style::UserpicButton &st)
+: RippleButton(parent, st.changeButton.ripple)
+, _st(st)
+, _controller(window->sessionController())
+, _window(window)
+, _peer(peer)
+, _cropTitle(CropTitle(peer))
+, _role(role) {
+	Expects(_role == Role::ChangePhoto);
+
+	_waiting = false;
+	prepare();
+}
+
+UserpicButton::UserpicButton(
+	QWidget *parent,
+	not_null<Window::Controller*> window,
 	const QString &cropTitle,
 	Role role,
 	const style::UserpicButton &st)
 : RippleButton(parent, st.changeButton.ripple)
 , _st(st)
+, _controller(window->sessionController())
+, _window(window)
 , _cropTitle(cropTitle)
 , _role(role) {
 	Expects(_role == Role::ChangePhoto);
@@ -203,6 +159,7 @@ UserpicButton::UserpicButton(
 : RippleButton(parent, st.changeButton.ripple)
 , _st(st)
 , _controller(controller)
+, _window(&controller->window())
 , _peer(peer)
 , _cropTitle(CropTitle(_peer))
 , _role(role) {
@@ -221,10 +178,12 @@ UserpicButton::UserpicButton(
 , _peer(peer)
 , _cropTitle(CropTitle(_peer))
 , _role(role) {
-	Expects(_role != Role::OpenProfile);
+	Expects(_role != Role::OpenProfile && _role != Role::OpenPhoto);
 
 	_waiting = false;
+	processPeerPhoto();
 	prepare();
+	setupPeerViewers();
 }
 
 void UserpicButton::prepare() {
@@ -242,7 +201,7 @@ void UserpicButton::setClickHandlerByRole() {
 		addClickHandler(App::LambdaDelayed(
 			_st.changeButton.ripple.hideDuration,
 			this,
-			[this] { changePhotoLazy(); }));
+			[=] { changePhotoLocally(); }));
 		break;
 
 	case Role::OpenPhoto:
@@ -261,18 +220,20 @@ void UserpicButton::setClickHandlerByRole() {
 	}
 }
 
-void UserpicButton::changePhotoLazy() {
-	auto callback = crl::guard(
+void UserpicButton::changePhotoLocally(bool requestToUpload) {
+	if (!_window) {
+		return;
+	}
+	auto callback = [=](QImage &&image) {
+		setImage(std::move(image));
+		if (requestToUpload) {
+			_uploadPhotoRequests.fire({});
+		}
+	};
+	Editor::PrepareProfilePhoto(
 		this,
-		[this](QImage &&image) { setImage(std::move(image)); });
-	ShowChoosePhotoBox(this, _cropTitle, std::move(callback));
-}
-
-void UserpicButton::uploadNewPeerPhoto() {
-	auto callback = crl::guard(this, [=](QImage &&image) {
-		_peer->session().api().uploadPeerPhoto(_peer, std::move(image));
-	});
-	ShowChoosePhotoBox(this, _cropTitle, std::move(callback));
+		_window,
+		std::move(callback));
 }
 
 void UserpicButton::openPeerPhoto() {
@@ -280,7 +241,7 @@ void UserpicButton::openPeerPhoto() {
 	Expects(_controller != nullptr);
 
 	if (_changeOverlayEnabled && _cursorInChangeOverlay) {
-		uploadNewPeerPhoto();
+		changePhotoLocally(true);
 		return;
 	}
 
@@ -289,8 +250,8 @@ void UserpicButton::openPeerPhoto() {
 		return;
 	}
 	const auto photo = _peer->owner().photo(id);
-	if (photo->date) {
-		Core::App().showPhoto(photo, _peer);
+	if (photo->date && _controller) {
+		_controller->openPhoto(photo, _peer);
 	}
 }
 
@@ -430,8 +391,10 @@ void UserpicButton::paintUserpicFrame(Painter &p, QPoint photoPosition) {
 	if (_streamed
 		&& _streamed->player().ready()
 		&& !_streamed->player().videoSize().isEmpty()) {
-		const auto paused = _controller->isGifPausedAtLeastFor(
-			Window::GifPauseReason::RoundPlaying);
+		const auto paused = _controller
+			? _controller->isGifPausedAtLeastFor(
+				Window::GifPauseReason::RoundPlaying)
+			: false;
 		auto request = Media::Streaming::FrameRequest();
 		auto size = QSize{ _st.photoSize, _st.photoSize };
 		request.outer = size * cIntRetinaFactor();
@@ -500,7 +463,7 @@ bool UserpicButton::createStreamingObjects(not_null<PhotoData*> photo) {
 	using namespace Media::Streaming;
 
 	const auto origin = _peer->isUser()
-		? Data::FileOriginUserPhoto(_peer->asUser()->bareId(), photo->id)
+		? Data::FileOriginUserPhoto(peerToUser(_peer->id), photo->id)
 		: Data::FileOrigin(Data::FileOriginPeerPhoto(_peer->id));
 	_streamed = std::make_unique<Instance>(
 		photo->owner().streaming().sharedDocument(photo, origin),
@@ -734,7 +697,7 @@ void UserpicButton::setImage(QImage &&image) {
 		Qt::IgnoreAspectRatio,
 		Qt::SmoothTransformation);
 	Images::prepareCircle(small);
-	_userpic = App::pixmapFromImageInPlace(std::move(small));
+	_userpic = Ui::PixmapFromImage(std::move(small));
 	_userpic.setDevicePixelRatio(cRetinaFactor());
 	_userpicCustom = _userpicHasImage = true;
 	_result = std::move(image);
@@ -767,110 +730,49 @@ void UserpicButton::prepareUserpicPixmap() {
 		? _peer->userpicUniqueKey(_userpicView)
 		: InMemoryKey();
 }
-// // #feed
-//FeedUserpicButton::FeedUserpicButton(
-//	QWidget *parent,
-//	not_null<Window::SessionController*> controller,
-//	not_null<Data::Feed*> feed,
-//	const style::FeedUserpicButton &st)
-//: AbstractButton(parent)
-//, _st(st)
-//, _controller(controller)
-//, _feed(feed) {
-//	prepare();
-//}
-//
-//void FeedUserpicButton::prepare() {
-//	resize(_st.size);
-//
-//	_feed->owner().feedUpdated(
-//	) | rpl::filter([=](const Data::FeedUpdate &update) {
-//		return (update.feed == _feed)
-//			&& (update.flag == Data::FeedUpdateFlag::Channels);
-//	}) | rpl::start_with_next([=] {
-//		crl::on_main(this, [=] { checkParts(); });
-//	}, lifetime());
-//
-//	refreshParts();
-//}
-//
-//void FeedUserpicButton::checkParts() {
-//	if (!partsAreValid()) {
-//		refreshParts();
-//	}
-//}
-//
-//bool FeedUserpicButton::partsAreValid() const {
-//	const auto &channels = _feed->channels();
-//	const auto count = std::min(int(channels.size()), 4);
-//	if (count != _parts.size()) {
-//		return false;
-//	}
-//	for (auto i = 0; i != count; ++i) {
-//		if (channels[i]->peer != _parts[i].channel) {
-//			return false;
-//		}
-//	}
-//	return true;
-//}
-//
-//void FeedUserpicButton::refreshParts() {
-//	const auto &channels = _feed->channels();
-//	const auto count = std::min(int(channels.size()), 4);
-//
-//	const auto createButton = [&](not_null<ChannelData*> channel) {
-//		auto result = base::make_unique_q<Ui::UserpicButton>(
-//			this,
-//			_controller,
-//			channel,
-//			Ui::UserpicButton::Role::Custom,
-//			_st.innerPart);
-//		result->setAttribute(Qt::WA_TransparentForMouseEvents);
-//		result->show();
-//		return result;
-//	};
-//
-//	const auto position = countInnerPosition();
-//	auto x = position.x();
-//	auto y = position.y();
-//	const auto delta = _st.innerSize - _st.innerPart.photoSize;
-//	_parts.clear();
-//	for (auto i = 0; i != count; ++i) {
-//		const auto channel = channels[i]->peer->asChannel();
-//		_parts.push_back({ channel, createButton(channel) });
-//		_parts.back().button->moveToLeft(x, y);
-//		switch (i) {
-//		case 0:
-//		case 2: x += delta; break;
-//		case 1: x -= delta; y += delta; break;
-//		}
-//	}
-//}
-//
-//QPoint FeedUserpicButton::countInnerPosition() const {
-//	auto innerLeft = (_st.innerPosition.x() < 0)
-//		? (width() - _st.innerSize) / 2
-//		: _st.innerPosition.x();
-//	auto innerTop = (_st.innerPosition.y() < 0)
-//		? (height() - _st.innerSize) / 2
-//		: _st.innerPosition.y();
-//	return { innerLeft, innerTop };
-//}
+
+rpl::producer<> UserpicButton::uploadPhotoRequests() const {
+	return _uploadPhotoRequests.events();
+}
 
 SilentToggle::SilentToggle(QWidget *parent, not_null<ChannelData*> channel)
-: IconButton(parent, st::historySilentToggle)
+: RippleButton(parent, st::historySilentToggle.ripple)
+, _st(st::historySilentToggle)
+, _colorOver(st::historyComposeIconFgOver->c)
 , _channel(channel)
-, _checked(channel->owner().notifySilentPosts(_channel)) {
+, _checked(channel->owner().notifySilentPosts(_channel))
+, _crossLine(st::historySilentToggleCrossLine) {
 	Expects(!channel->owner().notifySilentPostsUnknown(_channel));
 
-	if (_checked) {
-		refreshIconOverrides();
-	}
+	resize(_st.width, _st.height);
+
+	style::PaletteChanged(
+	) | rpl::start_with_next([=] {
+		_crossLine.invalidate();
+	}, lifetime());
+
+	paintRequest(
+	) | rpl::start_with_next([=](const QRect &clip) {
+		Painter p(this);
+		paintRipple(p, _st.rippleAreaPosition, nullptr);
+
+		_crossLine.paint(
+			p,
+			(width() - _st.icon.width()) / 2,
+			(height() - _st.icon.height()) / 2,
+			_crossLineAnimation.value(_checked ? 1. : 0.),
+			// Since buttons of the compose controls have no duration
+			// for the over animation, we can skip this animation here.
+			isOver()
+				? std::make_optional<QColor>(_colorOver)
+				: std::nullopt);
+	}, lifetime());
+
 	setMouseTracking(true);
 }
 
 void SilentToggle::mouseMoveEvent(QMouseEvent *e) {
-	IconButton::mouseMoveEvent(e);
+	RippleButton::mouseMoveEvent(e);
 	if (rect().contains(e->pos())) {
 		Ui::Tooltip::Show(1000, this);
 	} else {
@@ -881,28 +783,22 @@ void SilentToggle::mouseMoveEvent(QMouseEvent *e) {
 void SilentToggle::setChecked(bool checked) {
 	if (_checked != checked) {
 		_checked = checked;
-		refreshIconOverrides();
+		_crossLineAnimation.start(
+			[=] { update(); },
+			_checked ? 0. : 1.,
+			_checked ? 1. : 0.,
+			kAnimationDuration);
 	}
 }
 
-void SilentToggle::refreshIconOverrides() {
-	const auto iconOverride = _checked
-		? &st::historySilentToggleOn
-		: nullptr;
-	const auto iconOverOverride = _checked
-		? &st::historySilentToggleOnOver
-		: nullptr;
-	setIconOverride(iconOverride, iconOverOverride);
-}
-
 void SilentToggle::leaveEventHook(QEvent *e) {
-	IconButton::leaveEventHook(e);
+	RippleButton::leaveEventHook(e);
 	Ui::Tooltip::Hide();
 }
 
 void SilentToggle::mouseReleaseEvent(QMouseEvent *e) {
 	setChecked(!_checked);
-	IconButton::mouseReleaseEvent(e);
+	RippleButton::mouseReleaseEvent(e);
 	Ui::Tooltip::Show(0, this);
 	_channel->owner().updateNotifySettings(
 		_channel,
@@ -922,6 +818,20 @@ QPoint SilentToggle::tooltipPos() const {
 
 bool SilentToggle::tooltipWindowActive() const {
 	return Ui::AppInFocus() && InFocusChain(window());
+}
+
+QPoint SilentToggle::prepareRippleStartPosition() const {
+	const auto result = mapFromGlobal(QCursor::pos())
+		- _st.rippleAreaPosition;
+	const auto rect = QRect(0, 0, _st.rippleAreaSize, _st.rippleAreaSize);
+	return rect.contains(result)
+		? result
+		: DisabledRippleStartPosition();
+}
+
+QImage SilentToggle::prepareRippleMask() const {
+	return RippleAnimation::ellipseMask(
+		QSize(_st.rippleAreaSize, _st.rippleAreaSize));
 }
 
 } // namespace Ui

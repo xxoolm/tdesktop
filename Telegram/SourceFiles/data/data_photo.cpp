@@ -166,7 +166,7 @@ float64 PhotoData::progress() const {
 		if (uploadingData->size > 0) {
 			const auto result = float64(uploadingData->offset)
 				/ uploadingData->size;
-			return snap(result, 0., 1.);
+			return std::clamp(result, 0., 1.);
 		}
 		return 0.;
 	}
@@ -467,44 +467,4 @@ auto PhotoData::createStreamingLoader(
 			videoByteSize(),
 			origin)
 		: nullptr;
-}
-
-PhotoClickHandler::PhotoClickHandler(
-	not_null<PhotoData*> photo,
-	FullMsgId context,
-	PeerData *peer)
-: FileClickHandler(&photo->session(), context)
-, _photo(photo)
-, _peer(peer) {
-}
-
-void PhotoOpenClickHandler::onClickImpl() const {
-	Core::App().showPhoto(this);
-}
-
-void PhotoSaveClickHandler::onClickImpl() const {
-	const auto data = photo();
-	if (!data->date) {
-		return;
-	} else {
-		data->clearFailed(PhotoSize::Large);
-		data->load(context());
-	}
-}
-
-void PhotoCancelClickHandler::onClickImpl() const {
-	const auto data = photo();
-	if (!data->date) {
-		return;
-	} else if (data->uploading()) {
-		if (const auto item = data->owner().message(context())) {
-			if (const auto m = App::main()) { // multi good
-				if (&m->session() == &data->session()) {
-					m->cancelUploadLayer(item);
-				}
-			}
-		}
-	} else {
-		data->cancel();
-	}
 }

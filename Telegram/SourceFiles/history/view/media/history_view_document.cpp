@@ -18,12 +18,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/media/history_view_media_common.h"
 #include "ui/image/image.h"
 #include "ui/text/format_values.h"
+#include "ui/text/format_song_document_name.h"
 #include "ui/cached_round_corners.h"
+#include "ui/ui_utility.h"
 #include "layout.h" // FullSelection
 #include "data/data_session.h"
 #include "data/data_document.h"
 #include "data/data_document_media.h"
+#include "data/data_document_resolver.h"
 #include "data/data_media_types.h"
+#include "data/data_file_click_handler.h"
 #include "data/data_file_origin.h"
 #include "styles/style_chat.h"
 
@@ -148,7 +152,6 @@ Document::Document(
 	not_null<DocumentData*> document)
 : File(parent, realParent)
 , _data(document) {
-	const auto item = parent->data();
 	auto caption = createCaption();
 
 	createComponents(!caption.isEmpty());
@@ -214,18 +217,21 @@ void Document::createComponents(bool caption) {
 			_realParent->fullId());
 		thumbed->_linkcancell = std::make_shared<DocumentCancelClickHandler>(
 			_data,
+			crl::guard(this, [=](FullMsgId id) {
+				_parent->delegate()->elementCancelUpload(id);
+			}),
 			_realParent->fullId());
 	}
 	if (const auto voice = Get<HistoryDocumentVoice>()) {
 		voice->_seekl = std::make_shared<VoiceSeekClickHandler>(
 			_data,
-			_realParent->fullId());
+			[](FullMsgId) {});
 	}
 }
 
 void Document::fillNamedFromData(HistoryDocumentNamed *named) {
 	const auto nameString = named->_name = CleanTagSymbols(
-		_data->composeNameString());
+		Ui::Text::FormatSongNameFor(_data).string());
 	named->_namew = st::semiboldFont->width(nameString);
 }
 
@@ -442,31 +448,56 @@ void Document::draw(
 		}
 	} else {
 		p.setPen(Qt::NoPen);
-		if (selected) {
-			p.setBrush(outbg ? st::msgFileOutBgSelected : st::msgFileInBgSelected);
-		} else {
-			p.setBrush(outbg ? st::msgFileOutBg : st::msgFileInBg);
-		}
 
-		{
+		const auto coverDrawn = _data->isSongWithCover()
+			&& DrawThumbnailAsSongCover(p, _dataMedia, inner, selected);
+		if (!coverDrawn) {
 			PainterHighQualityEnabler hq(p);
+			p.setBrush(selected
+				? (outbg ? st::msgFileOutBgSelected : st::msgFileInBgSelected)
+				: (outbg ? st::msgFileOutBg : st::msgFileInBg));
 			p.drawEllipse(inner);
 		}
 
 		const auto icon = [&] {
 			if (_data->waitingForAlbum()) {
+				if (_data->isSongWithCover()) {
+					return &(selected
+						? st::historyFileSongWaitingSelected
+						: st::historyFileSongWaiting);
+				}
 				return &(outbg ? (selected ? st::historyFileOutWaitingSelected : st::historyFileOutWaiting) : (selected ? st::historyFileInWaitingSelected : st::historyFileInWaiting));
 			} else if (!cornerDownload && (_data->loading() || _data->uploading())) {
+				if (_data->isSongWithCover()) {
+					return &(selected
+						? st::historyFileSongCancelSelected
+						: st::historyFileSongCancel);
+				}
 				return &(outbg ? (selected ? st::historyFileOutCancelSelected : st::historyFileOutCancel) : (selected ? st::historyFileInCancelSelected : st::historyFileInCancel));
 			} else if (showPause) {
+				if (_data->isSongWithCover()) {
+					return &(selected
+						? st::historyFileSongPauseSelected
+						: st::historyFileSongPause);
+				}
 				return &(outbg ? (selected ? st::historyFileOutPauseSelected : st::historyFileOutPause) : (selected ? st::historyFileInPauseSelected : st::historyFileInPause));
 			} else if (loaded || _dataMedia->canBePlayed()) {
 				if (_dataMedia->canBePlayed()) {
+					if (_data->isSongWithCover()) {
+						return &(selected
+							? st::historyFileSongPlaySelected
+							: st::historyFileSongPlay);
+					}
 					return &(outbg ? (selected ? st::historyFileOutPlaySelected : st::historyFileOutPlay) : (selected ? st::historyFileInPlaySelected : st::historyFileInPlay));
 				} else if (_data->isImage()) {
 					return &(outbg ? (selected ? st::historyFileOutImageSelected : st::historyFileOutImage) : (selected ? st::historyFileInImageSelected : st::historyFileInImage));
 				}
 				return &(outbg ? (selected ? st::historyFileOutDocumentSelected : st::historyFileOutDocument) : (selected ? st::historyFileInDocumentSelected : st::historyFileInDocument));
+			}
+			if (_data->isSongWithCover()) {
+				return &(selected
+					? st::historyFileSongDownloadSelected
+					: st::historyFileSongDownload);
 			}
 			return &(outbg ? (selected ? st::historyFileOutDownloadSelected : st::historyFileOutDownload) : (selected ? st::historyFileInDownloadSelected : st::historyFileInDownload));
 		}();
@@ -581,7 +612,7 @@ void Document::ensureDataMediaCreated() const {
 		return;
 	}
 	_dataMedia = _data->createMediaView();
-	if (Get<HistoryDocumentThumbed>()) {
+	if (Get<HistoryDocumentThumbed>() || _data->isSongWithCover()) {
 		_dataMedia->thumbnailWanted(_realParent->fullId());
 	}
 	history()->owner().registerHeavyViewPart(_parent);
@@ -671,7 +702,6 @@ TextState Document::textState(
 		StateRequest request,
 		LayoutMode mode) const {
 	const auto width = layout.width();
-	const auto height = layout.height();
 
 	auto result = TextState(_parent);
 
@@ -682,7 +712,7 @@ TextState Document::textState(
 	ensureDataMediaCreated();
 	bool loaded = dataLoaded();
 
-	bool showPause = updateStatusText();
+	updateStatusText();
 
 	const auto topMinus = isBubbleTop() ? 0 : st::msgFileTopMinus;
 	const auto thumbed = Get<HistoryDocumentThumbed>();
@@ -692,7 +722,6 @@ TextState Document::textState(
 	const auto nameleft = st.padding.left() + st.thumbSize + st.padding.right();
 	const auto nametop = st.nameTop - topMinus;
 	const auto nameright = st.padding.left();
-	const auto statustop = st.statusTop - topMinus;
 	const auto linktop = st.linkTop - topMinus;
 	const auto bottom = st.padding.top() + st.thumbSize + st.padding.bottom() - topMinus;
 	const auto rthumb = style::rtlrect(st.padding.left(), st.padding.top() - topMinus, st.thumbSize, st.thumbSize, width);
@@ -777,7 +806,11 @@ void Document::updatePressed(QPoint point) {
 			const auto &st = thumbed ? st::msgFileThumbLayout : st::msgFileLayout;
 			const auto nameleft = st.padding.left() + st.thumbSize + st.padding.right();
 			const auto nameright = st.padding.left();
-			voice->setSeekingCurrent(snap((point.x() - nameleft) / float64(width() - nameleft - nameright), 0., 1.));
+			voice->setSeekingCurrent(std::clamp(
+				(point.x() - nameleft)
+					/ float64(width() - nameleft - nameright),
+				0.,
+				1.));
 			history()->owner().requestViewRepaint(_parent);
 		}
 	}
@@ -805,7 +838,6 @@ bool Document::hasTextForCopy() const {
 
 TextForMimeData Document::selectedText(TextSelection selection) const {
 	if (const auto captioned = Get<HistoryDocumentCaptioned>()) {
-		const auto &caption = captioned->_caption;
 		return captioned->_caption.toTextForMimeData(selection);
 	}
 	return TextForMimeData();
@@ -862,7 +894,12 @@ bool Document::updateStatusText() const {
 				bool was = (voice->_playback != nullptr);
 				voice->ensurePlayback(this);
 				if (!was || state.position != voice->_playback->position) {
-					auto prg = state.length ? snap(float64(state.position) / state.length, 0., 1.) : 0.;
+					auto prg = state.length
+						? std::clamp(
+							float64(state.position) / state.length,
+							0.,
+							1.)
+						: 0.;
 					if (voice->_playback->position < state.position) {
 						voice->_playback->progress.start(prg);
 					} else {
@@ -951,6 +988,7 @@ void Document::drawGrouped(
 		const QRect &geometry,
 		RectParts sides,
 		RectParts corners,
+		float64 highlightOpacity,
 		not_null<uint64*> cacheKey,
 		not_null<QPixmap*> cache) const {
 	p.translate(geometry.topLeft());
@@ -1059,7 +1097,8 @@ TextWithEntities Document::getCaption() const {
 }
 
 Ui::Text::String Document::createCaption() {
-	const auto timestampLinksDuration = _data->isSong()
+	const auto timestampLinksDuration = (_data->isSong()
+			|| _data->isVoiceMessage())
 		? _data->getDuration()
 		: 0;
 	const auto timestampLinkBase = timestampLinksDuration
@@ -1069,6 +1108,51 @@ Ui::Text::String Document::createCaption() {
 		_realParent,
 		timestampLinksDuration,
 		timestampLinkBase);
+}
+
+bool DrawThumbnailAsSongCover(
+		Painter &p,
+		const std::shared_ptr<Data::DocumentMedia> &dataMedia,
+		const QRect &rect,
+		const bool selected) {
+	if (!dataMedia) {
+		return false;
+	}
+
+	QPixmap cover;
+
+	const auto ow = rect.width();
+	const auto oh = rect.height();
+	const auto r = ImageRoundRadius::Ellipse;
+	const auto c = RectPart::AllCorners;
+	const auto color = &st::songCoverOverlayFg;
+	const auto aspectRatio = Qt::KeepAspectRatioByExpanding;
+
+	const auto scaled = [&](not_null<Image*> image) -> std::pair<int, int> {
+		const auto size = image->size().scaled(ow, oh, aspectRatio);
+		return { size.width(), size.height() };
+	};
+
+	if (const auto normal = dataMedia->thumbnail()) {
+		const auto &[w, h] = scaled(normal);
+		cover = normal->pixSingle(w, h, ow, oh, r, c, color);
+	} else if (const auto blurred = dataMedia->thumbnailInline()) {
+		const auto &[w, h] = scaled(blurred);
+		cover = blurred->pixBlurredSingle(w, h, ow, oh, r, c, color);
+	} else {
+		return false;
+	}
+	if (selected) {
+		auto selectedCover = Images::prepareColored(
+			p.textPalette().selectOverlay,
+			cover.toImage());
+		cover = QPixmap::fromImage(
+			std::move(selectedCover),
+			Qt::ColorOnly);
+	}
+	p.drawPixmap(rect.topLeft(), cover);
+
+	return true;
 }
 
 } // namespace HistoryView

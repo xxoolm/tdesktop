@@ -10,9 +10,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "mtproto/sender.h"
 #include "base/flat_set.h"
+#include "base/openssl_help.h"
 #include "boxes/confirm_box.h"
 #include "boxes/confirm_phone_box.h" // ExtractPhonePrefix.
-#include "boxes/photo_crop_box.h"
 #include "boxes/peer_list_controllers.h"
 #include "boxes/peers/add_participants_box.h"
 #include "boxes/peers/edit_participant_box.h"
@@ -39,6 +39,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
+#include "api/api_invite_links.h"
 #include "main/main_session.h"
 #include "facades.h"
 #include "styles/style_layers.h"
@@ -92,7 +93,7 @@ void ChatCreateDone(
 		}
 		| [&](auto chats) {
 			return navigation->session().data().chat(
-				chats->front().c_chat().vid().v);
+				chats->front().c_chat().vid());
 		}
 		| [&](not_null<ChatData*> chat) {
 			if (!image.isNull()) {
@@ -157,7 +158,7 @@ void ShowAddParticipantsError(
 				auto box = Box<EditAdminBox>(
 					channel,
 					user,
-					MTP_chatAdminRights(MTP_flags(0)),
+					ChatAdminRightsInfo(),
 					QString());
 				box->setSaveCallback(saveCallback);
 				*weak = Ui::show(std::move(box));
@@ -266,7 +267,7 @@ AddContactBox::AddContactBox(
 	this,
 	st::defaultInputField,
 	tr::lng_contact_phone(),
-	ExtractPhonePrefix(session->user()->phone()),
+	Ui::ExtractPhonePrefix(session->user()->phone()),
 	phone)
 , _invertOrder(langFirstNameGoesSecond()) {
 	if (!phone.isEmpty()) {
@@ -382,7 +383,7 @@ void AddContactBox::save() {
 		lastName = QString();
 	}
 	_sentName = firstName;
-	_contactId = rand_value<uint64>();
+	_contactId = openssl::RandomValue<uint64>();
 	_addRequest = _session->api().request(MTPcontacts_ImportContacts(
 		MTP_vector<MTPInputContact>(
 			1,
@@ -399,7 +400,7 @@ void AddContactBox::save() {
 			const auto extractUser = [&](const MTPImportedContact &data) {
 				return data.match([&](const MTPDimportedContact &data) {
 					return (data.vclient_id().v == _contactId)
-						? _session->data().userLoaded(data.vuser_id().v)
+						? _session->data().userLoaded(data.vuser_id())
 						: nullptr;
 				});
 			};
@@ -464,6 +465,7 @@ void GroupInfoBox::prepare() {
 
 	_photo.create(
 		this,
+		&_navigation->parentController()->window(),
 		((_type == Type::Channel)
 			? tr::lng_create_channel_crop
 			: tr::lng_create_group_crop)(tr::now),
@@ -584,7 +586,7 @@ void GroupInfoBox::createGroup(
 
 		Ui::hideLayer(); // Destroys 'this'.
 		ChatCreateDone(navigation, std::move(image), result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		_creationRequestId = 0;
 		if (error.type() == qstr("NO_CHAT_TITLE")) {
 			auto weak = Ui::MakeWeak(this);
@@ -612,7 +614,9 @@ void GroupInfoBox::createGroup(
 }
 
 void GroupInfoBox::submit() {
-	if (_creationRequestId) return;
+	if (_creationRequestId || _creatingInviteLink) {
+		return;
+	}
 
 	auto title = TextUtilities::PrepareForSending(_title->getLastText());
 	auto description = _description
@@ -651,6 +655,8 @@ void GroupInfoBox::submit() {
 }
 
 void GroupInfoBox::createChannel(const QString &title, const QString &description) {
+	Expects(!_creationRequestId);
+
 	const auto flags = (_type == Type::Megagroup)
 		? MTPchannels_CreateChannel::Flag::f_megagroup
 		: MTPchannels_CreateChannel::Flag::f_broadcast;
@@ -681,7 +687,7 @@ void GroupInfoBox::createChannel(const QString &title, const QString &descriptio
 			}
 			| [&](auto chats) {
 				return _navigation->session().data().channel(
-					chats->front().c_channel().vid().v);
+					chats->front().c_channel().vid());
 			}
 			| [&](not_null<ChannelData*> channel) {
 				auto image = _photo->takeResultImage();
@@ -691,31 +697,13 @@ void GroupInfoBox::createChannel(const QString &title, const QString &descriptio
 						std::move(image));
 				}
 				_createdChannel = channel;
-				_creationRequestId = _api.request(MTPmessages_ExportChatInvite(
-					_createdChannel->input
-				)).done([=](const MTPExportedChatInvite &result) {
-					_creationRequestId = 0;
-					if (result.type() == mtpc_chatInviteExported) {
-						auto link = qs(result.c_chatInviteExported().vlink());
-						_createdChannel->setInviteLink(link);
-					}
-					if (_channelDone) {
-						const auto callback = _channelDone;
-						const auto argument = _createdChannel;
-						closeBox();
-						callback(argument);
-					} else {
-						Ui::show(Box<SetupChannelBox>(
-							_navigation,
-							_createdChannel));
-					}
-				}).send();
+				checkInviteLink();
 			};
 		if (!success) {
 			LOG(("API Error: channel not found in updates (GroupInfoBox::creationDone)"));
 			closeBox();
 		}
-	}).fail([this](const RPCError &error) {
+	}).fail([this](const MTP::Error &error) {
 		_creationRequestId = 0;
 		if (error.type() == "NO_CHAT_TITLE") {
 			_title->setFocus();
@@ -726,6 +714,32 @@ void GroupInfoBox::createChannel(const QString &title, const QString &descriptio
 			Ui::show(Box<InformBox>(tr::lng_cant_do_this(tr::now))); // TODO
 		}
 	}).send();
+}
+
+void GroupInfoBox::checkInviteLink() {
+	Expects(_createdChannel != nullptr);
+
+	if (!_createdChannel->inviteLink().isEmpty()) {
+		channelReady();
+		return;
+	}
+	_creatingInviteLink = true;
+	_createdChannel->session().api().inviteLinks().create(
+		_createdChannel,
+		crl::guard(this, [=](auto&&) { channelReady(); }));
+}
+
+void GroupInfoBox::channelReady() {
+	if (_channelDone) {
+		const auto callback = _channelDone;
+		const auto argument = _createdChannel;
+		closeBox();
+		callback(argument);
+	} else {
+		Ui::show(Box<SetupChannelBox>(
+			_navigation,
+			_createdChannel));
+	}
 }
 
 void GroupInfoBox::descriptionResized() {
@@ -810,7 +824,7 @@ void SetupChannelBox::prepare() {
 	_checkRequestId = _api.request(MTPchannels_CheckUsername(
 		_channel->inputChannel,
 		MTP_string("preston")
-	)).fail([=](const RPCError &error) {
+	)).fail([=](const MTP::Error &error) {
 		firstCheckFail(error);
 	}).send();
 
@@ -829,7 +843,7 @@ void SetupChannelBox::prepare() {
 
 	_channel->session().changes().peerUpdates(
 		_channel,
-		Data::PeerUpdate::Flag::InviteLink
+		Data::PeerUpdate::Flag::InviteLinks
 	) | rpl::start_with_next([=] {
 		rtlupdate(_invitationLink);
 	}, lifetime());
@@ -938,7 +952,7 @@ void SetupChannelBox::mouseMoveEvent(QMouseEvent *e) {
 void SetupChannelBox::mousePressEvent(QMouseEvent *e) {
 	if (_linkOver) {
 		if (_channel->inviteLink().isEmpty()) {
-			_channel->session().api().exportInviteLink(_channel);
+			_channel->session().api().inviteLinks().create(_channel);
 		} else {
 			QGuiApplication::clipboard()->setText(_channel->inviteLink());
 			Ui::Toast::Show(tr::lng_create_channel_link_copied(tr::now));
@@ -969,7 +983,7 @@ void SetupChannelBox::save() {
 			MTP_string(_sentUsername)
 		)).done([=](const MTPBool &result) {
 			updateDone(result);
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			updateFail(error);
 		}).send();
 	};
@@ -1041,7 +1055,7 @@ void SetupChannelBox::check() {
 			MTP_string(link)
 		)).done([=](const MTPBool &result) {
 			checkDone(result);
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			checkFail(error);
 		}).send();
 	}
@@ -1081,7 +1095,7 @@ void SetupChannelBox::updateDone(const MTPBool &result) {
 	closeBox();
 }
 
-void SetupChannelBox::updateFail(const RPCError &error) {
+void SetupChannelBox::updateFail(const MTP::Error &error) {
 	_saveRequestId = 0;
 	QString err(error.type());
 	if (err == "USERNAME_NOT_MODIFIED"
@@ -1116,7 +1130,7 @@ void SetupChannelBox::checkDone(const MTPBool &result) {
 	}
 }
 
-void SetupChannelBox::checkFail(const RPCError &error) {
+void SetupChannelBox::checkFail(const MTP::Error &error) {
 	_checkRequestId = 0;
 	QString err(error.type());
 	if (err == qstr("CHANNEL_PUBLIC_GROUP_NA")) {
@@ -1157,7 +1171,7 @@ void SetupChannelBox::showRevokePublicLinkBoxForEdit() {
 		Ui::LayerOption::KeepOther);
 }
 
-void SetupChannelBox::firstCheckFail(const RPCError &error) {
+void SetupChannelBox::firstCheckFail(const MTP::Error &error) {
 	_checkRequestId = 0;
 	const auto &type = error.type();
 	if (type == qstr("CHANNEL_PUBLIC_GROUP_NA")) {
@@ -1267,7 +1281,7 @@ void EditNameBox::save() {
 		MTPstring()
 	)).done([=](const MTPUser &result) {
 		saveSelfDone(result);
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		saveSelfFail(error);
 	}).send();
 }
@@ -1277,7 +1291,7 @@ void EditNameBox::saveSelfDone(const MTPUser &user) {
 	closeBox();
 }
 
-void EditNameBox::saveSelfFail(const RPCError &error) {
+void EditNameBox::saveSelfFail(const MTP::Error &error) {
 	auto err = error.type();
 	auto first = TextUtilities::SingleLine(_first->getLastText().trimmed());
 	auto last = TextUtilities::SingleLine(_last->getLastText().trimmed());

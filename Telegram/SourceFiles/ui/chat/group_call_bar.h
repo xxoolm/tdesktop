@@ -18,17 +18,43 @@ namespace Ui {
 
 class PlainShadow;
 class RoundButton;
+struct GroupCallUser;
+class GroupCallUserpics;
 
 struct GroupCallBarContent {
-	struct User {
-		QImage userpic;
-		std::pair<uint64, uint64> userpicKey = {};
-		int32 id = 0;
-		bool speaking = false;
-	};
+	QString title;
+	TimeId scheduleDate = 0;
 	int count = 0;
 	bool shown = false;
-	std::vector<User> users;
+	std::vector<GroupCallUser> users;
+};
+
+class GroupCallScheduledLeft final {
+public:
+	enum class Negative {
+		Show,
+		Ignore,
+	};
+	explicit GroupCallScheduledLeft(TimeId date);
+
+	void setDate(TimeId date);
+
+	[[nodiscard]] rpl::producer<QString> text(Negative negative) const;
+	[[nodiscard]] rpl::producer<bool> late() const;
+
+private:
+	[[nodiscard]] crl::time computePreciseDate() const;
+	void restart();
+	void update();
+
+	rpl::variable<QString> _text;
+	rpl::variable<QString> _textNonNegative;
+	rpl::variable<bool> _late;
+	TimeId _date = 0;
+	crl::time _datePrecise = 0;
+	base::Timer _timer;
+	rpl::lifetime _lifetime;
+
 };
 
 class GroupCallBar final {
@@ -58,42 +84,33 @@ public:
 	}
 
 private:
-	using User = GroupCallBarContent::User;
-	struct BlobsAnimation;
-	struct Userpic;
+	using User = GroupCallUser;
 
+	void refreshOpenBrush();
+	void refreshScheduledProcess();
 	void updateShadowGeometry(QRect wrapGeometry);
 	void updateControlsGeometry(QRect wrapGeometry);
-	void updateUserpicsFromContent();
-	void setupInner();
-	void paint(Painter &p);
-	void paintUserpics(Painter &p);
-
-	void toggleUserpic(Userpic &userpic, bool shown);
 	void updateUserpics();
-	void updateUserpicsPositions();
-	void validateUserpicCache(Userpic &userpic);
-	[[nodiscard]] bool needUserpicCacheRefresh(Userpic &userpic);
-	void ensureBlobsAnimation(Userpic &userpic);
-	void sendRandomLevels();
+	void setupInner();
+	void setupRightButton(not_null<RoundButton*> button);
+	void paint(Painter &p);
 
 	SlideWrap<> _wrap;
 	not_null<RpWidget*> _inner;
 	std::unique_ptr<RoundButton> _join;
+	std::unique_ptr<RoundButton> _open;
+	rpl::event_stream<Qt::MouseButton> _joinClicks;
+	QBrush _openBrushOverride;
+	int _openBrushForWidth = 0;
 	std::unique_ptr<PlainShadow> _shadow;
 	rpl::event_stream<> _barClicks;
 	Fn<QRect(QRect)> _shadowGeometryPostprocess;
-	std::vector<Userpic> _userpics;
-	base::Timer _randomSpeakingTimer;
-	Ui::Animations::Basic _speakingAnimation;
-	int _maxUserpicsWidth = 0;
 	bool _shouldBeShown = false;
 	bool _forceHidden = false;
 
-	bool _skipLevelUpdate = false;
-	crl::time _speakingAnimationHideLastTime = 0;
-
 	GroupCallBarContent _content;
+	std::unique_ptr<GroupCallScheduledLeft> _scheduledProcess;
+	std::unique_ptr<GroupCallUserpics> _userpics;
 
 };
 

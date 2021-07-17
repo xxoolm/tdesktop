@@ -34,7 +34,11 @@ void CheckChatInvite(
 	session->api().checkChatInvite(hash, [=](const MTPChatInvite &result) {
 		Core::App().hideMediaView();
 		result.match([=](const MTPDchatInvite &data) {
-			const auto box = Ui::show(Box<ConfirmInviteBox>(
+			const auto strongController = weak.get();
+			if (!strongController) {
+				return;
+			}
+			const auto box = strongController->show(Box<ConfirmInviteBox>(
 				session,
 				data,
 				invitePeekChannel,
@@ -75,12 +79,15 @@ void CheckChatInvite(
 				}
 			}
 		});
-	}, [=](const RPCError &error) {
+	}, [=](const MTP::Error &error) {
 		if (error.code() != 400) {
 			return;
 		}
 		Core::App().hideMediaView();
-		Ui::show(Box<InformBox>(tr::lng_group_invite_bad_link(tr::now)));
+		if (const auto strong = weak.get()) {
+			strong->show(
+				Box<InformBox>(tr::lng_group_invite_bad_link(tr::now)));
+		}
 	});
 }
 

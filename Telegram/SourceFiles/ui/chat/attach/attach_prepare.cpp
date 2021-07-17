@@ -7,7 +7,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/chat/attach/attach_prepare.h"
 
+#include "ui/rp_widget.h"
+#include "ui/widgets/popup_menu.h"
+
 #include "ui/chat/attach/attach_send_files_way.h"
+#include "ui/image/image_prepare.h"
+#include "ui/ui_utility.h"
 #include "core/mime_type.h"
 
 namespace Ui {
@@ -109,7 +114,7 @@ bool PreparedList::canBeSentInSlowmodeWith(const PreparedList &other) const {
 	}
 
 	using Type = PreparedFile::Type;
-	auto &&all = ranges::view::concat(files, other.files);
+	auto &&all = ranges::views::concat(files, other.files);
 	const auto has = [&](Type type) {
 		return ranges::contains(all, type, &PreparedFile::type);
 	};
@@ -253,6 +258,22 @@ std::vector<PreparedGroup> DivideByGroups(
 		pushGroup();
 	}
 	return result;
+}
+
+QPixmap PrepareSongCoverForThumbnail(QImage image, int size) {
+	const auto scaledSize = image.size().scaled(
+		size,
+		size,
+		Qt::KeepAspectRatioByExpanding);
+	using Option = Images::Option;
+	return PixmapFromImage(Images::prepare(
+		std::move(image),
+		scaledSize.width() * style::DevicePixelRatio(),
+		scaledSize.height() * style::DevicePixelRatio(),
+		Option::Circled | Option::Colored | Option::Smooth,
+		size,
+		size,
+		&st::songCoverOverlayFg));
 }
 
 } // namespace Ui

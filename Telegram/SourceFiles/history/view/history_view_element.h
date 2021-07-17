@@ -22,6 +22,10 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
+namespace Ui {
+class PathShiftGradient;
+} // namespace Ui
+
 namespace HistoryView {
 
 enum class PointState : char;
@@ -34,7 +38,6 @@ enum class Context : char {
 	History,
 	Replies,
 	Pinned,
-	//Feed, // #feed
 	AdminLog,
 	ContactPreview
 };
@@ -51,7 +54,7 @@ public:
 		Element *replacing = nullptr) = 0;
 	virtual bool elementUnderCursor(not_null<const Element*> view) = 0;
 	virtual crl::time elementHighlightTime(
-		not_null<const Element*> element) = 0;
+		not_null<const HistoryItem*> item) = 0;
 	virtual bool elementInSelectionMode() = 0;
 	virtual bool elementIntersectsRange(
 		not_null<const Element*> view,
@@ -61,6 +64,14 @@ public:
 	virtual void elementShowPollResults(
 		not_null<PollData*> poll,
 		FullMsgId context) = 0;
+	virtual void elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context) = 0;
+	virtual void elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView = false) = 0;
+	virtual void elementCancelUpload(const FullMsgId &context) = 0;
 	virtual void elementShowTooltip(
 		const TextWithEntities &text,
 		Fn<void()> hiddenCallback) = 0;
@@ -71,13 +82,23 @@ public:
 		const QString &command,
 		const FullMsgId &context) = 0;
 	virtual void elementHandleViaClick(not_null<UserData*> bot) = 0;
+	virtual bool elementIsChatWide() = 0;
+	virtual not_null<Ui::PathShiftGradient*> elementPathShiftGradient() = 0;
+
+	virtual ~ElementDelegate() {
+	}
 
 };
 
+[[nodiscard]] std::unique_ptr<Ui::PathShiftGradient> MakePathShiftGradient(
+	Fn<void()> update);
+
 class SimpleElementDelegate : public ElementDelegate {
 public:
-	explicit SimpleElementDelegate(
-		not_null<Window::SessionController*> controller);
+	SimpleElementDelegate(
+		not_null<Window::SessionController*> controller,
+		Fn<void()> update);
+	~SimpleElementDelegate();
 
 	std::unique_ptr<Element> elementCreate(
 		not_null<HistoryMessage*> message,
@@ -87,7 +108,7 @@ public:
 		Element *replacing = nullptr) override;
 	bool elementUnderCursor(not_null<const Element*> view) override;
 	crl::time elementHighlightTime(
-		not_null<const Element*> element) override;
+		not_null<const HistoryItem*> item) override;
 	bool elementInSelectionMode() override;
 	bool elementIntersectsRange(
 		not_null<const Element*> view,
@@ -97,6 +118,14 @@ public:
 	void elementShowPollResults(
 		not_null<PollData*> poll,
 		FullMsgId context) override;
+	void elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context) override;
+	void elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView = false) override;
+	void elementCancelUpload(const FullMsgId &context) override;
 	void elementShowTooltip(
 		const TextWithEntities &text,
 		Fn<void()> hiddenCallback) override;
@@ -107,9 +136,12 @@ public:
 		const QString &command,
 		const FullMsgId &context) override;
 	void elementHandleViaClick(not_null<UserData*> bot) override;
+	bool elementIsChatWide() override;
+	not_null<Ui::PathShiftGradient*> elementPathShiftGradient() override;
 
 private:
 	const not_null<Window::SessionController*> _controller;
+	const std::unique_ptr<Ui::PathShiftGradient> _pathGradient;
 
 };
 
@@ -126,6 +158,8 @@ TextSelection ShiftItemSelection(
 	TextSelection selection,
 	const Ui::Text::String &byText);
 
+QString DateTooltipText(not_null<Element*> view);
+
 // Any HistoryView::Element can have this Component for
 // displaying the unread messages bar above the message.
 struct UnreadBar : public RuntimeComponent<UnreadBar, Element> {
@@ -134,7 +168,7 @@ struct UnreadBar : public RuntimeComponent<UnreadBar, Element> {
 	static int height();
 	static int marginTop();
 
-	void paint(Painter &p, int y, int w) const;
+	void paint(Painter &p, int y, int w, bool chatWide) const;
 
 	QString text;
 	int width = 0;
@@ -148,7 +182,7 @@ struct DateBadge : public RuntimeComponent<DateBadge, Element> {
 	void init(const QString &date);
 
 	int height() const;
-	void paint(Painter &p, int y, int w) const;
+	void paint(Painter &p, int y, int w, bool chatWide) const;
 
 	QString text;
 	int width = 0;
@@ -290,6 +324,8 @@ public:
 	virtual void applyGroupAdminChanges(
 		const base::flat_set<UserId> &changes) {
 	}
+	[[nodiscard]] virtual bool toggleSelectionByHandlerClick(
+		const ClickHandlerPtr &handler) const;
 
 	struct VerticalRepaintRange {
 		int top = 0;
@@ -300,6 +336,13 @@ public:
 	virtual bool hasHeavyPart() const;
 	virtual void unloadHeavyPart();
 	void checkHeavyPart();
+
+	void paintCustomHighlight(
+		Painter &p,
+		int y,
+		int height,
+		not_null<const HistoryItem*> item) const;
+	float64 highlightOpacity(not_null<const HistoryItem*> item) const;
 
 	// Legacy blocks structure.
 	HistoryBlock *block();
@@ -316,12 +359,18 @@ public:
 	void previousInBlocksChanged();
 	void nextInBlocksRemoved();
 
+	[[nodiscard]] ClickHandlerPtr fromPhotoLink() const {
+		return fromLink();
+	}
+
 	virtual ~Element();
 
 protected:
 	void paintHighlight(
 		Painter &p,
 		int geometryHeight) const;
+
+	[[nodiscard]] ClickHandlerPtr fromLink() const;
 
 	virtual void refreshDataIdHook();
 

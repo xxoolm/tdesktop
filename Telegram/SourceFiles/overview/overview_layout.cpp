@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "overview/overview_layout_delegate.h"
 #include "data/data_document.h"
+#include "data/data_document_resolver.h"
 #include "data/data_session.h"
 #include "data/data_web_page.h"
 #include "data/data_media_types.h"
@@ -16,6 +17,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_file_origin.h"
 #include "data/data_photo_media.h"
 #include "data/data_document_media.h"
+#include "data/data_file_click_handler.h"
 #include "styles/style_overview.h"
 #include "styles/style_chat.h"
 #include "core/file_utilities.h"
@@ -33,14 +35,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h"
 #include "history/history_item_components.h"
 #include "history/view/history_view_cursor_state.h"
+#include "history/view/media/history_view_document.h" // DrawThumbnailAsSongCover
 #include "base/unixtime.h"
 #include "base/qt_adapters.h"
 #include "ui/effects/round_checkbox.h"
 #include "ui/image/image.h"
+#include "ui/text/format_song_document_name.h"
 #include "ui/text/format_values.h"
 #include "ui/text/text_options.h"
 #include "ui/cached_round_corners.h"
-#include "app.h"
+#include "ui/ui_utility.h"
 
 namespace Overview {
 namespace Layout {
@@ -54,38 +58,6 @@ TextParseOptions _documentNameOptions = {
 	0, // maxh
 	Qt::LayoutDirectionAuto, // dir
 };
-
-TextWithEntities ComposeNameWithEntities(DocumentData *document) {
-	TextWithEntities result;
-	const auto song = document->song();
-	if (!song || (song->title.isEmpty() && song->performer.isEmpty())) {
-		result.text = document->filename().isEmpty()
-			? qsl("Unknown File")
-			: document->filename();
-		result.entities.push_back({
-			EntityType::Semibold,
-			0,
-			result.text.size()
-		});
-	} else if (song->performer.isEmpty()) {
-		result.text = song->title;
-		result.entities.push_back({
-			EntityType::Semibold,
-			0,
-			result.text.size()
-		});
-	} else {
-		result.text = song->performer
-			+ QString::fromUtf8(" \xe2\x80\x93 ")
-			+ (song->title.isEmpty() ? qsl("Unknown Track") : song->title);
-		result.entities.push_back({
-			EntityType::Semibold,
-			0,
-			song->performer.size()
-		});
-	}
-	return result;
-}
 
 } // namespace
 
@@ -214,9 +186,17 @@ void RadialProgressItem::setDocumentLinks(
 		not_null<DocumentData*> document) {
 	const auto context = parent()->fullId();
 	setLinks(
-		std::make_shared<DocumentOpenClickHandler>(document, context),
+		std::make_shared<DocumentOpenClickHandler>(
+			document,
+			crl::guard(this, [=](FullMsgId id) {
+				delegate()->openDocument(document, id);
+			}),
+			context),
 		std::make_shared<DocumentSaveClickHandler>(document, context),
-		std::make_shared<DocumentCancelClickHandler>(document, context));
+		std::make_shared<DocumentCancelClickHandler>(
+			document,
+			nullptr,
+			context));
 }
 
 void RadialProgressItem::clickHandlerActiveChanged(
@@ -301,7 +281,10 @@ Photo::Photo(
 	not_null<PhotoData*> photo)
 : ItemBase(delegate, parent)
 , _data(photo)
-, _link(std::make_shared<PhotoOpenClickHandler>(photo, parent->fullId())) {
+, _link(std::make_shared<PhotoOpenClickHandler>(
+	photo,
+	crl::guard(this, [=](FullMsgId id) { delegate->openPhoto(photo, id); }),
+	parent->fullId())) {
 	if (_data->inlineThumbnailBytes().isEmpty()
 		&& (_data->hasExact(Data::PhotoSize::Small)
 			|| _data->hasExact(Data::PhotoSize::Thumbnail))) {
@@ -385,7 +368,7 @@ void Photo::setPixFrom(not_null<Image*> image) {
 		delegate()->unregisterHeavyItem(this);
 	}
 
-	_pix = App::pixmapFromImageInPlace(std::move(img));
+	_pix = Ui::PixmapFromImage(std::move(img));
 }
 
 void Photo::ensureDataMediaCreated() const {
@@ -476,7 +459,7 @@ void Video::paint(Painter &p, const QRect &clip, TextSelection selection, const 
 		}
 		img.setDevicePixelRatio(cRetinaFactor());
 
-		_pix = App::pixmapFromImageInPlace(std::move(img));
+		_pix = Ui::PixmapFromImage(std::move(img));
 		_pixBlurred = !(thumbnail || good);
 	}
 
@@ -593,7 +576,6 @@ TextState Video::getState(
 }
 
 void Video::updateStatusText() {
-	bool showPause = false;
 	int statusSize = 0;
 	if (_data->status == FileDownloadFailed || _data->status == FileUploadFailed) {
 		statusSize = Ui::FileStatusSizeFailed;
@@ -622,7 +604,12 @@ Voice::Voice(
 	const style::OverviewFileLayout &st)
 : RadialProgressItem(delegate, parent)
 , _data(voice)
-, _namel(std::make_shared<DocumentOpenClickHandler>(_data, parent->fullId()))
+, _namel(std::make_shared<DocumentOpenClickHandler>(
+	_data,
+	crl::guard(this, [=](FullMsgId id) {
+		delegate->openDocument(_data, id);
+	}),
+	parent->fullId()))
 , _st(st) {
 	AddComponents(Info::Bit());
 
@@ -733,13 +720,15 @@ void Voice::paint(Painter &p, const QRect &clip, TextSelection selection, const 
 
 		const auto icon = [&] {
 			if (_data->loading() || _data->uploading()) {
-				return &(selected ? _st.songCancelSelected : _st.songCancel);
+				return &(selected ? _st.voiceCancelSelected : _st.voiceCancel);
 			} else if (showPause) {
-				return &(selected ? _st.songPauseSelected : _st.songPause);
+				return &(selected ? _st.voicePauseSelected : _st.voicePause);
 			} else if (_dataMedia->canBePlayed()) {
-				return &(selected ? _st.songPlaySelected : _st.songPlay);
+				return &(selected ? _st.voicePlaySelected : _st.voicePlay);
 			}
-			return &(selected ? _st.songDownloadSelected : _st.songDownload);
+			return &(selected
+				? _st.voiceDownloadSelected
+				: _st.voiceDownload);
 		}();
 		icon->paintInCenter(p, inner);
 	}
@@ -927,12 +916,20 @@ Document::Document(
 : RadialProgressItem(delegate, parent)
 , _data(document)
 , _msgl(goToMessageClickHandler(parent))
-, _namel(std::make_shared<DocumentOpenClickHandler>(_data, parent->fullId()))
+, _namel(std::make_shared<DocumentOpenClickHandler>(
+	_data,
+	crl::guard(this, [=](FullMsgId id) {
+		delegate->openDocument(_data, id);
+	}),
+	parent->fullId()))
 , _st(st)
 , _date(langDateTime(base::unixtime::parse(_data->date)))
 , _datew(st::normalFont->width(_date))
 , _colorIndex(documentColorIndex(_data, _ext)) {
-	_name.setMarkedText(st::defaultTextStyle, ComposeNameWithEntities(_data), _documentNameOptions);
+	_name.setMarkedText(
+		st::defaultTextStyle,
+		Ui::Text::FormatSongNameFor(_data).textWithEntities(),
+		_documentNameOptions);
 
 	AddComponents(Info::Bit());
 
@@ -1008,21 +1005,51 @@ void Document::paint(Painter &p, const QRect &clip, TextSelection selection, con
 
 		auto inner = style::rtlrect(_st.songPadding.left(), _st.songPadding.top(), _st.songThumbSize, _st.songThumbSize, _width);
 		if (clip.intersects(inner)) {
+			const auto isLoading = (!cornerDownload
+				&& (_data->loading() || _data->uploading()));
 			p.setPen(Qt::NoPen);
-			if (selected) {
-				p.setBrush(st::msgFileInBgSelected);
-			} else {
-				auto over = ClickHandler::showAsActive((!cornerDownload && (_data->loading() || _data->uploading())) ? _cancell : (loaded || _dataMedia->canBePlayed()) ? _openl : _savel);
-				p.setBrush(anim::brush(_st.songIconBg, _st.songOverBg, _a_iconOver.value(over ? 1. : 0.)));
-			}
 
-			{
+			using namespace HistoryView;
+			const auto coverDrawn = _data->isSongWithCover()
+				&& DrawThumbnailAsSongCover(p, _dataMedia, inner, selected);
+			if (!coverDrawn) {
+				if (selected) {
+					p.setBrush(st::msgFileInBgSelected);
+				} else {
+					const auto over = ClickHandler::showAsActive(isLoading
+						? _cancell
+						: (loaded || _dataMedia->canBePlayed())
+						? _openl
+						: _savel);
+					p.setBrush(anim::brush(
+						_st.songIconBg,
+						_st.songOverBg,
+						_a_iconOver.value(over ? 1. : 0.)));
+				}
 				PainterHighQualityEnabler hq(p);
 				p.drawEllipse(inner);
 			}
 
 			const auto icon = [&] {
-				if (!cornerDownload && (_data->loading() || _data->uploading())) {
+				if (!coverDrawn) {
+					if (isLoading) {
+						return &(selected
+							? _st.voiceCancelSelected
+							: _st.voiceCancel);
+					} else if (showPause) {
+						return &(selected
+							? _st.voicePauseSelected
+							: _st.voicePause);
+					} else if (loaded || _dataMedia->canBePlayed()) {
+						return &(selected
+							? _st.voicePlaySelected
+							: _st.voicePlay);
+					}
+					return &(selected
+						? _st.voiceDownloadSelected
+						: _st.voiceDownload);
+				}
+				if (isLoading) {
 					return &(selected ? _st.songCancelSelected : _st.songCancel);
 				} else if (showPause) {
 					return &(selected ? _st.songPauseSelected : _st.songPause);
@@ -1057,7 +1084,6 @@ void Document::paint(Painter &p, const QRect &clip, TextSelection selection, con
 			if (wthumb) {
 				ensureDataMediaCreated();
 				const auto thumbnail = _dataMedia->thumbnail();
-				const auto thumbLoaded = (thumbnail != nullptr);
 				const auto blurred = _dataMedia->thumbnailInline();
 				if (thumbnail || blurred) {
 					if (_thumb.isNull() || (thumbnail && !_thumbLoaded)) {
@@ -1211,7 +1237,6 @@ TextState Document::getState(
 		StateRequest request) const {
 	ensureDataMediaCreated();
 	const auto loaded = dataLoaded();
-	const auto wthumb = withThumb();
 
 	if (_data->isSong()) {
 		const auto nameleft = _st.songPadding.left() + _st.songThumbSize + _st.songPadding.right();
@@ -1220,7 +1245,6 @@ TextState Document::getState(
 			_width - nameleft - nameright,
 			_name.maxWidth());
 		const auto nametop = _st.songNameTop;
-		const auto statustop = _st.songStatusTop;
 
 		if (const auto state = cornerDownloadTextState(point, request); state.link) {
 			return state;
@@ -1257,7 +1281,6 @@ TextState Document::getState(
 		const auto namewidth = std::min(
 			_width - nameleft - nameright,
 			_name.maxWidth());
-		const auto statustop = st::linksBorder + _st.fileStatusTop;
 		const auto datetop = st::linksBorder + _st.fileDateTop;
 
 		const auto rthumb = style::rtlrect(
@@ -1448,6 +1471,9 @@ Link::Link(
 		if (_page->document) {
 			_photol = std::make_shared<DocumentOpenClickHandler>(
 				_page->document,
+				crl::guard(this, [=](FullMsgId id) {
+					delegate->openDocument(_page->document, id);
+				}),
 				parent->fullId());
 		} else if (_page->photo) {
 			if (_page->type == WebPageType::Profile || _page->type == WebPageType::Video) {
@@ -1457,6 +1483,9 @@ Link::Link(
 				|| _page->siteName == qstr("Facebook")) {
 				_photol = std::make_shared<PhotoOpenClickHandler>(
 					_page->photo,
+					crl::guard(this, [=](FullMsgId id) {
+						delegate->openPhoto(_page->photo, id);
+					}),
 					parent->fullId());
 			} else {
 				_photol = createHandler(_page->url);
@@ -1479,9 +1508,8 @@ Link::Link(
 	int32 tw = 0, th = 0;
 	if (_page && _page->photo) {
 		const auto photo = _page->photo;
-		if (photo->inlineThumbnailBytes().isEmpty()
-			&& (photo->hasExact(Data::PhotoSize::Small)
-				|| photo->hasExact(Data::PhotoSize::Thumbnail))) {
+		if (photo->hasExact(Data::PhotoSize::Small)
+			|| photo->hasExact(Data::PhotoSize::Thumbnail)) {
 			photo->load(Data::PhotoSize::Small, parent->fullId());
 		}
 		tw = style::ConvertScale(photo->width());
@@ -1547,7 +1575,7 @@ void Link::initDimensions() {
 int32 Link::resizeGetHeight(int32 width) {
 	_width = qMin(width, _maxw);
 	int32 w = _width - st::linksPhotoSize - st::linksPhotoPadding;
-	for (const auto &link : _links) {
+	for (const auto &link : std::as_const(_links)) {
 		link.lnk->setFullDisplayed(w >= link.width);
 	}
 
@@ -1602,7 +1630,7 @@ void Link::paint(Painter &p, const QRect &clip, TextSelection selection, const P
 	}
 
 	p.setPen(st::windowActiveTextFg);
-	for (const auto &link : _links) {
+	for (const auto &link : std::as_const(_links)) {
 		if (clip.intersects(style::rtlrect(left, top, qMin(w, link.width), st::normalFont->height, _width))) {
 			p.setFont(ClickHandler::showAsActive(link.lnk) ? st::normalFont->underline() : st::normalFont);
 			p.drawTextLeft(left, top, _width, (w < link.width) ? st::normalFont->elided(link.text, w) : link.text);
@@ -1623,7 +1651,7 @@ void Link::paint(Painter &p, const QRect &clip, TextSelection selection, const P
 }
 
 void Link::validateThumbnail() {
-	if (!_thumbnail.isNull()) {
+	if (!_thumbnail.isNull() && !_thumbnailBlurred) {
 		return;
 	}
 	if (_page && _page->photo) {
@@ -1631,12 +1659,16 @@ void Link::validateThumbnail() {
 		ensurePhotoMediaCreated();
 		if (const auto thumbnail = _photoMedia->image(PhotoSize::Thumbnail)) {
 			_thumbnail = thumbnail->pixSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, ImageRoundRadius::Small);
+			_thumbnailBlurred = false;
 		} else if (const auto large = _photoMedia->image(PhotoSize::Large)) {
 			_thumbnail = large->pixSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, ImageRoundRadius::Small);
+			_thumbnailBlurred = false;
 		} else if (const auto small = _photoMedia->image(PhotoSize::Small)) {
 			_thumbnail = small->pixSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, ImageRoundRadius::Small);
+			_thumbnailBlurred = false;
 		} else if (const auto blurred = _photoMedia->thumbnailInline()) {
 			_thumbnail = blurred->pixBlurredSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, ImageRoundRadius::Small);
+			return;
 		} else {
 			return;
 		}
@@ -1644,14 +1676,20 @@ void Link::validateThumbnail() {
 		delegate()->unregisterHeavyItem(this);
 	} else if (_page && _page->document && _page->document->hasThumbnail()) {
 		ensureDocumentMediaCreated();
+		const auto roundRadius = _page->document->isVideoMessage()
+			? ImageRoundRadius::Ellipse
+			: ImageRoundRadius::Small;
 		if (const auto thumbnail = _documentMedia->thumbnail()) {
-			auto roundRadius = _page->document->isVideoMessage()
-				? ImageRoundRadius::Ellipse
-				: ImageRoundRadius::Small;
 			_thumbnail = thumbnail->pixSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, roundRadius);
-			_documentMedia = nullptr;
-			delegate()->unregisterHeavyItem(this);
+			_thumbnailBlurred = false;
+		} else if (const auto blurred = _documentMedia->thumbnailInline()) {
+			_thumbnail = blurred->pixBlurredSingle(_pixw, _pixh, st::linksPhotoSize, st::linksPhotoSize, roundRadius);
+			return;
+		} else {
+			return;
 		}
+		_documentMedia = nullptr;
+		delegate()->unregisterHeavyItem(this);
 	} else {
 		const auto size = QSize(st::linksPhotoSize, st::linksPhotoSize);
 		_thumbnail = QPixmap(size * cIntRetinaFactor());
@@ -1683,6 +1721,7 @@ void Link::validateThumbnail() {
 				_letter,
 				style::al_center);
 		}
+		_thumbnailBlurred = false;
 	}
 }
 

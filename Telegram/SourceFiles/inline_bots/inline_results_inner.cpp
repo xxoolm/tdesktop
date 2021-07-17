@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "inline_bots/inline_results_inner.h"
 
 #include "api/api_common.h"
+#include "chat_helpers/gifs_list_widget.h" // ChatHelpers::AddGifAction
 #include "chat_helpers/send_context_menu.h" // SendMenu::FillSendMenu
 #include "data/data_file_origin.h"
 #include "data/data_user.h"
@@ -22,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/popup_menu.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
+#include "ui/effects/path_shift_gradient.h"
 #include "history/view/history_view_cursor_state.h"
 #include "styles/style_chat_helpers.h"
 
@@ -35,6 +37,10 @@ Inner::Inner(
 	not_null<Window::SessionController*> controller)
 : RpWidget(parent)
 , _controller(controller)
+, _pathGradient(std::make_unique<Ui::PathShiftGradient>(
+	st::windowBgRipple,
+	st::windowBgOver,
+	[=] { update(); }))
 , _updateInlineItems([=] { updateInlineItems(); })
 , _previewTimer([=] { showPreview(); }) {
 	resize(st::emojiPanWidth - st::emojiScroll.width - st::roundRadiusSmall, st::inlineResultsMinHeight);
@@ -47,11 +53,13 @@ Inner::Inner(
 		update();
 	}, lifetime());
 
-	subscribe(controller->gifPauseLevelChanged(), [this] {
-		if (!_controller->isGifPausedAtLeastFor(Window::GifPauseReason::InlineResults)) {
+	controller->gifPauseLevelChanged(
+	) | rpl::start_with_next([=] {
+		if (!_controller->isGifPausedAtLeastFor(
+				Window::GifPauseReason::InlineResults)) {
 			update();
 		}
-	});
+	}, lifetime());
 
 	_controller->session().changes().peerUpdates(
 		Data::PeerUpdate::Flag::Rights
@@ -80,7 +88,7 @@ void Inner::checkRestrictedPeer() {
 	if (_inlineQueryPeer) {
 		const auto error = Data::RestrictionError(
 			_inlineQueryPeer,
-			ChatRestriction::f_send_inline);
+			ChatRestriction::SendInline);
 		if (error) {
 			if (!_restrictedLabel) {
 				_restrictedLabel.create(this, *error, st::stickersRestrictedLabel);
@@ -169,6 +177,8 @@ void Inner::paintInlineItems(Painter &p, const QRect &r) {
 	}
 	auto gifPaused = _controller->isGifPausedAtLeastFor(Window::GifPauseReason::InlineResults);
 	InlineBots::Layout::PaintContext context(crl::now(), false, gifPaused, false);
+	context.pathGradient = _pathGradient.get();
+	context.pathGradient->startFrame(0, width(), width() / 2);
 
 	auto top = st::stickerPanPadding;
 	if (_switchPmButton) {
@@ -233,22 +243,22 @@ void Inner::mouseReleaseEvent(QMouseEvent *e) {
 		return;
 	}
 
-	if (dynamic_cast<InlineBots::Layout::SendClickHandler*>(activated.get())) {
-		int row = _selected / MatrixRowShift, column = _selected % MatrixRowShift;
-		selectInlineResult(row, column);
+	using namespace InlineBots::Layout;
+	const auto open = dynamic_cast<OpenFileClickHandler*>(activated.get());
+	if (dynamic_cast<SendClickHandler*>(activated.get()) || open) {
+		const auto row = int(_selected / MatrixRowShift);
+		const auto column = int(_selected % MatrixRowShift);
+		selectInlineResult(row, column, {}, !!open);
 	} else {
 		ActivateClickHandler(window(), activated, e->button());
 	}
 }
 
-void Inner::selectInlineResult(int row, int column) {
-	selectInlineResult(row, column, Api::SendOptions());
-}
-
 void Inner::selectInlineResult(
 		int row,
 		int column,
-		Api::SendOptions options) {
+		Api::SendOptions options,
+		bool open) {
 	if (row >= _rows.size() || column >= _rows.at(row).items.size()) {
 		return;
 	}
@@ -259,7 +269,8 @@ void Inner::selectInlineResult(
 			_resultSelectedCallback({
 				.result = inlineResult,
 				.bot = _inlineBot,
-				.options = std::move(options)
+				.options = std::move(options),
+				.open = open,
 			});
 		}
 	}
@@ -297,7 +308,7 @@ void Inner::contextMenuEvent(QContextMenuEvent *e) {
 	_menu = base::make_unique_q<Ui::PopupMenu>(this);
 
 	const auto send = [=](Api::SendOptions options) {
-		selectInlineResult(row, column, options);
+		selectInlineResult(row, column, options, false);
 	};
 	SendMenu::FillSendMenu(
 		_menu,
@@ -305,7 +316,15 @@ void Inner::contextMenuEvent(QContextMenuEvent *e) {
 		SendMenu::DefaultSilentCallback(send),
 		SendMenu::DefaultScheduleCallback(this, type, send));
 
-	if (!_menu->actions().empty()) {
+	auto item = _rows[row].items[column];
+	if (const auto previewDocument = item->getPreviewDocument()) {
+		auto callback = [&](const QString &text, Fn<void()> &&done) {
+			_menu->addAction(text, std::move(done));
+		};
+		ChatHelpers::AddGifAction(std::move(callback), previewDocument);
+	}
+
+	if (!_menu->empty()) {
 		_menu->popup(QCursor::pos());
 	}
 }
@@ -631,7 +650,6 @@ bool Inner::inlineItemVisible(const ItemBase *layout) {
 	int row = position / MatrixRowShift, col = position % MatrixRowShift;
 	Assert((row < _rows.size()) && (col < _rows[row].items.size()));
 
-	auto &inlineItems = _rows[row].items;
 	int top = st::stickerPanPadding;
 	for (int32 i = 0; i < row; ++i) {
 		top += _rows.at(i).height;
@@ -649,7 +667,6 @@ void Inner::updateSelected() {
 		return;
 	}
 
-	auto newSelected = -1;
 	auto p = mapFromGlobal(_lastMousePos);
 
 	int sx = (rtl() ? width() - p.x() : p.x()) - (st::inlineResultsLeft - st::roundRadiusSmall);
@@ -713,14 +730,14 @@ void Inner::updateSelected() {
 			_pressed = _selected;
 			if (row >= 0 && col >= 0) {
 				auto layout = _rows.at(row).items.at(col);
-				if (const auto w = App::wnd()) {
-					if (const auto previewDocument = layout->getPreviewDocument()) {
-						w->showMediaPreview(
-							Data::FileOrigin(),
-							previewDocument);
-					} else if (auto previewPhoto = layout->getPreviewPhoto()) {
-						w->showMediaPreview(Data::FileOrigin(), previewPhoto);
-					}
+				if (const auto previewDocument = layout->getPreviewDocument()) {
+					_controller->widget()->showMediaPreview(
+						Data::FileOrigin(),
+						previewDocument);
+				} else if (auto previewPhoto = layout->getPreviewPhoto()) {
+					_controller->widget()->showMediaPreview(
+						Data::FileOrigin(),
+						previewPhoto);
 				}
 			}
 		}
@@ -740,12 +757,14 @@ void Inner::showPreview() {
 	int row = _pressed / MatrixRowShift, col = _pressed % MatrixRowShift;
 	if (row < _rows.size() && col < _rows.at(row).items.size()) {
 		auto layout = _rows.at(row).items.at(col);
-		if (const auto w = App::wnd()) {
-			if (const auto previewDocument = layout->getPreviewDocument()) {
-				_previewShown = w->showMediaPreview(Data::FileOrigin(), previewDocument);
-			} else if (const auto previewPhoto = layout->getPreviewPhoto()) {
-				_previewShown = w->showMediaPreview(Data::FileOrigin(), previewPhoto);
-			}
+		if (const auto previewDocument = layout->getPreviewDocument()) {
+			_previewShown = _controller->widget()->showMediaPreview(
+				Data::FileOrigin(),
+				previewDocument);
+		} else if (const auto previewPhoto = layout->getPreviewPhoto()) {
+			_previewShown = _controller->widget()->showMediaPreview(
+				Data::FileOrigin(),
+				previewPhoto);
 		}
 	}
 }

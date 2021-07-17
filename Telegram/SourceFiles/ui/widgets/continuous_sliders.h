@@ -178,17 +178,27 @@ public:
 			callback(convert(index));
 		});
 	}
+	void setActiveFgOverride(std::optional<QColor> color);
+	void addDivider(float64 atValue, const QSize &size);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
 
 private:
+	struct Divider {
+		const float64 atValue;
+		const QSize size;
+	};
+
 	QSize getSeekDecreaseSize() const override;
 	float64 getOverDuration() const override;
 
 	const style::MediaSlider &_st;
 	bool _alwaysDisplayMarker = false;
 	bool _paintDisabled = false;
+
+	std::vector<Divider> _dividers;
+	std::optional<QColor> _activeFgOverride;
 
 };
 

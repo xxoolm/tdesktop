@@ -76,10 +76,6 @@ defaultFeedUserpicButton: FeedUserpicButton {
 	innerPart: defaultUserpicButton;
 }
 
-cropPointSize: 10px;
-cropSkip: 13px;
-cropMinSize: 20px;
-
 confirmInviteTitle: FlatLabel(defaultFlatLabel) {
 	align: align(center);
 	minWidth: 320px;
@@ -111,7 +107,7 @@ confirmInviteUserName: FlatLabel(defaultFlatLabel) {
 confirmInviteUserNameTop: 227px;
 
 confirmPhoneAboutLabel: FlatLabel(defaultFlatLabel) {
-	minWidth: 282px;
+	minWidth: 272px;
 }
 confirmPhoneCodeField: InputField(defaultInputField) {
 }
@@ -158,27 +154,28 @@ contactsMarginBottom: 4px;
 membersMarginTop: 10px;
 membersMarginBottom: 10px;
 
+peerListBoxItem: PeerListItem(defaultPeerListItem) {
+	height: 56px;
+	photoSize: contactsPhotoSize;
+	photoPosition: point(16px, 7px);
+	namePosition: point(74px, 9px);
+	statusPosition: point(74px, 30px);
+	button: OutlineButton(defaultPeerListButton) {
+		textBg: contactsBg;
+		textBgOver: contactsBgOver;
+		ripple: defaultRippleAnimation;
+	}
+	statusFg: contactsStatusFg;
+	statusFgOver: contactsStatusFgOver;
+	statusFgActive: contactsStatusFgOnline;
+}
 peerListBox: PeerList(defaultPeerList) {
 	padding: margins(
 		0px,
 		membersMarginTop,
 		0px,
 		membersMarginBottom);
-	item: PeerListItem(defaultPeerListItem) {
-		height: 56px;
-		photoSize: contactsPhotoSize;
-		photoPosition: point(16px, 7px);
-		namePosition: point(74px, 9px);
-		statusPosition: point(74px, 30px);
-		button: OutlineButton(defaultPeerListButton) {
-			textBg: contactsBg;
-			textBgOver: contactsBgOver;
-			ripple: defaultRippleAnimation;
-		}
-		statusFg: contactsStatusFg;
-		statusFgOver: contactsStatusFgOver;
-		statusFgActive: contactsStatusFgOnline;
-	}
+	item: peerListBoxItem;
 }
 
 localStorageRowHeight: 50px;
@@ -214,17 +211,23 @@ localStorageLimitMargin: margins(22px, 5px, 20px, 10px);
 shareRowsTop: 12px;
 shareRowHeight: 108px;
 sharePhotoTop: 6px;
-sharePhotoCheckbox: RoundImageCheckbox(defaultPeerListCheckbox) {
-	imageRadius: 28px;
-	imageSmallRadius: 24px;
+shareBoxListItem: PeerListItem(defaultPeerListItem) {
+	nameStyle: TextStyle(defaultTextStyle) {
+		font: font(11px);
+		linkFont: font(11px);
+		linkFontOver: font(11px);
+	}
+	nameFg: windowFg;
+	nameFgChecked: windowActiveTextFg;
+	checkbox: RoundImageCheckbox(defaultPeerListCheckbox) {
+		imageRadius: 28px;
+		imageSmallRadius: 24px;
+	}
 }
-shareNameStyle: TextStyle(defaultTextStyle) {
-	font: font(11px);
-	linkFont: font(11px);
-	linkFontOver: font(11px);
+shareBoxList: PeerList(defaultPeerList) {
+	bg: boxBg;
+	item: shareBoxListItem;
 }
-shareNameFg: windowFg;
-shareNameActiveFg: windowActiveTextFg;
 shareNameTop: 6px;
 shareColumnSkip: 6px;
 shareActivateDuration: 150;
@@ -379,6 +382,7 @@ confirmCaptionArea: InputField(defaultInputField) {
 	textMargins: margins(1px, 26px, 31px, 4px);
 	heightMax: 158px;
 }
+confirmEditCaptionAreaHeightMax: 78px;
 confirmBg: windowBgOver;
 confirmMaxHeight: 245px;
 confirmMaxHeightSkip: 25px;
@@ -420,33 +424,42 @@ backgroundScroll: ScrollArea(boxScroll) {
 	deltab: 10px;
 }
 
-editMediaButtonSize: 28px;
-editMediaButtonSkip: 8px;
+sendMediaPreviewSize: 308px;
+sendMediaPreviewHeightMax: 1280;
+sendMediaRowSkip: 10px;
+
+editMediaButtonSize: 32px;
+editMediaButtonSkip: 5px;
 editMediaButtonFileSkipRight: 1px;
 editMediaButtonFileSkipTop: 7px;
 
-editMediaButtonIconFile: icon {{ "settings_edit", menuIconFg }};
-editMediaButtonIconPhoto: icon {{ "settings_edit", msgServiceFg }};
-editMediaButton: IconButton {
+editMediaButtonIconFile: icon {{ "send_media/send_media_replace", menuIconFg }};
+editMediaButton: IconButton(defaultIconButton) {
 	width: editMediaButtonSize;
 	height: editMediaButtonSize;
 
-	icon: editMediaButtonIconPhoto;
+	icon: editMediaButtonIconFile;
 
 	rippleAreaSize: editMediaButtonSize;
 	ripple: defaultRippleAnimation;
 }
 
+editMediaHintLabel: FlatLabel(defaultFlatLabel) {
+	textFg: windowSubTextFg;
+	minWidth: sendMediaPreviewSize;
+}
+
 // SendFilesBox
 
 sendBoxAlbumGroupEditInternalSkip: 8px;
-sendBoxAlbumGroupSkipRight: 6px;
-sendBoxAlbumGroupSkipTop: 6px;
-sendBoxAlbumGroupRadius: 13px;
-sendBoxAlbumGroupHeight: 26px;
+sendBoxAlbumGroupSkipRight: 5px;
+sendBoxAlbumGroupSkipTop: 5px;
+sendBoxAlbumGroupRadius: 4px;
+sendBoxAlbumGroupSize: size(62px, 25px);
+sendBoxAlbumSmallGroupSize: size(30px, 25px);
 
 sendBoxFileGroupSkipTop: 2px;
-sendBoxFileGroupSkipRight: 8px;
+sendBoxFileGroupSkipRight: 5px;
 sendBoxFileGroupEditInternalSkip: -1px;
 
 sendBoxAlbumGroupButtonFile: IconButton(editMediaButton) {
@@ -455,16 +468,11 @@ sendBoxAlbumGroupButtonFile: IconButton(editMediaButton) {
 	}
 }
 sendBoxAlbumGroupEditButtonIconFile: editMediaButtonIconFile;
-sendBoxAlbumGroupDeleteButtonIconFile: icon {{ "history_file_cancel", menuIconFg, point(6px, 6px) }};
+sendBoxAlbumGroupDeleteButtonIconFile: icon {{ "send_media/send_media_delete", menuIconFg }};
 
-sendBoxAlbumGroupButtonMediaEdit: icon {{ "settings_edit", msgServiceFg, point(3px, -2px) }};
-sendBoxAlbumGroupButtonMediaDelete: icon {{ "history_file_cancel", msgServiceFg, point(2px, 5px) }};
-sendBoxAlbumGroupButtonMedia: IconButton {
-	width: sendBoxAlbumGroupHeight;
-	height: sendBoxAlbumGroupHeight;
-
-	icon: sendBoxAlbumGroupButtonMediaEdit;
-}
+sendBoxAlbumButtonMediaEdit: icon {{ "send_media/send_media_replace", roundedFg }};
+sendBoxAlbumGroupButtonMediaEdit: icon {{ "send_media/send_media_replace", roundedFg, point(4px, 1px) }};
+sendBoxAlbumGroupButtonMediaDelete: icon {{ "send_media/send_media_delete", roundedFg }};
 
 // End of SendFilesBox
 
@@ -516,6 +524,7 @@ usernameTextStyle: TextStyle(boxTextStyle, passcodeTextStyle) {
 }
 usernameDefaultFg: windowSubTextFg;
 
+editMediaLabelMargins: margins(0px, 11px, 0px, 0px);
 editMediaCheckboxMargins: margins(0px, 15px, 23px, 15px);
 
 downloadPathSkip: 10px;
@@ -642,10 +651,6 @@ groupStickersField: InputField(defaultMultiSelectSearchField) {
 }
 groupStickersSubTitleHeight: 36px;
 
-sendMediaPreviewSize: 308px;
-sendMediaPreviewHeightMax: 1280;
-sendMediaRowSkip: 10px;
-
 proxyUsePadding: margins(22px, 6px, 22px, 5px);
 proxyTryIPv6Padding: margins(22px, 8px, 22px, 5px);
 proxyRowPadding: margins(22px, 8px, 8px, 8px);
@@ -722,10 +727,6 @@ termsAgePadding: margins(22px, 16px, 16px, 0px);
 
 themesSmallSkip: 10px;
 themesBackgroundSize: 120px;
-themesScroll: ScrollArea(defaultScrollArea) {
-	bottomsh: 0px;
-	topsh: 0px;
-}
 themesMenuToggle: IconButton(defaultIconButton) {
 	width: 44px;
 	height: 44px;
@@ -904,4 +905,63 @@ pollResultsShowMore: SettingsButton(defaultSettingsButton) {
 	padding: margins(71px, 10px, 8px, 8px);
 
 	ripple: defaultRippleAnimation;
+}
+
+inviteViaLinkButton: SettingsButton(defaultSettingsButton) {
+	textFg: lightButtonFg;
+	textFgOver: lightButtonFgOver;
+	textBg: windowBg;
+	textBgOver: windowBgOver;
+
+	font: font(14px semibold);
+
+	height: 20px;
+	padding: margins(74px, 8px, 8px, 9px);
+
+	ripple: defaultRippleAnimation;
+}
+inviteViaLinkIcon: icon {{ "info/edit/group_manage_links", lightButtonFg }};
+inviteViaLinkIconPosition: point(23px, 2px);
+peerListWithInviteViaLink: PeerList(peerListBox) {
+	padding: margins(
+		0px,
+		0px,
+		0px,
+		membersMarginBottom);
+}
+peerListSingleRow: PeerList(peerListBox) {
+	padding: margins(0px, 0px, 0px, 0px);
+}
+
+scheduleHeight: 95px;
+scheduleDateTop: 38px;
+scheduleDateField: InputField(defaultInputField) {
+	textMargins: margins(2px, 0px, 2px, 0px);
+	placeholderScale: 0.;
+	heightMin: 30px;
+	textAlign: align(top);
+	font: font(14px);
+}
+scheduleTimeField: InputField(scheduleDateField) {
+	border: 0px;
+	borderActive: 0px;
+	heightMin: 28px;
+	placeholderFont: font(14px);
+	placeholderFgActive: placeholderFgActive;
+}
+scheduleDateWidth: 136px;
+scheduleTimeWidth: 72px;
+scheduleAtSkip: 24px;
+scheduleAtTop: 42px;
+scheduleAtLabel: FlatLabel(defaultFlatLabel) {
+}
+scheduleTimeSeparator: FlatLabel(defaultFlatLabel) {
+	style: TextStyle(defaultTextStyle) {
+		font: font(14px);
+	}
+}
+scheduleTimeSeparatorPadding: margins(2px, 0px, 2px, 0px);
+
+boxAttentionDividerLabel: FlatLabel(boxDividerLabel) {
+	textFg: boxTextFgError;
 }

@@ -15,6 +15,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/mime_type.h"
 #include "base/unixtime.h"
 #include "base/qt_adapters.h"
+#include "editor/scene/scene.h" // Editor::Scene::attachedStickers
 #include "media/audio/media_audio.h"
 #include "media/clip/media_clip_reader.h"
 #include "mtproto/facade.h"
@@ -58,7 +59,7 @@ PreparedFileThumbnail PrepareFileThumbnail(QImage &&original) {
 		return {};
 	}
 	auto result = PreparedFileThumbnail();
-	result.id = rand_value<uint64>();
+	result.id = openssl::RandomValue<uint64>();
 	const auto scaled = (width > kThumbnailSize || height > kThumbnailSize);
 	const auto scaledWidth = [&] {
 		return (width > height)
@@ -79,7 +80,6 @@ PreparedFileThumbnail PrepareFileThumbnail(QImage &&original) {
 		: std::move(original);
 	result.mtpSize = MTP_photoSize(
 		MTP_string(),
-		MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)),
 		MTP_int(result.image.width()),
 		MTP_int(result.image.height()),
 		MTP_int(0));
@@ -107,7 +107,7 @@ PreparedFileThumbnail FinalizeFileThumbnail(
 		bool isSticker) {
 	prepared.name = isSticker ? qsl("thumb.webp") : qsl("thumb.jpg");
 	if (FileThumbnailUploadRequired(filemime, filesize)) {
-		const auto format = QByteArray(isSticker ? "WEBP" : "JPG");
+		const auto format = isSticker ? "WEBP" : "JPG";
 		auto buffer = QBuffer(&prepared.bytes);
 		prepared.image.save(&buffer, format, kThumbnailQuality);
 	}
@@ -210,7 +210,6 @@ SendMediaReady PreparePeerPhoto(MTP::DcId dcId, PeerId peerId, QImage &&image) {
 			QByteArray bytes = QByteArray()) {
 		photoSizes.push_back(MTP_photoSize(
 			MTP_string(type),
-			MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)),
 			MTP_int(image.width()),
 			MTP_int(image.height()), MTP_int(0)));
 		photoThumbs.emplace(type[0], PreparedPhotoThumb{
@@ -222,7 +221,7 @@ SendMediaReady PreparePeerPhoto(MTP::DcId dcId, PeerId peerId, QImage &&image) {
 	push("b", scaled(320));
 	push("c", std::move(image), jpeg);
 
-	const auto id = rand_value<PhotoId>();
+	const auto id = openssl::RandomValue<PhotoId>();
 	const auto photo = MTP_photo(
 		MTP_flags(0),
 		MTP_long(id),
@@ -299,7 +298,7 @@ void TaskQueue::wakeThread() {
 		_thread->start();
 	}
 	if (_stopTimer) _stopTimer->stop();
-	emit taskAdded();
+	taskAdded();
 }
 
 void TaskQueue::cancelTask(TaskId id) {
@@ -393,7 +392,7 @@ void TaskQueueWorker::onTaskAdded() {
 				}
 			}
 			if (emitTaskProcessed) {
-				emit taskProcessed();
+				taskProcessed();
 			}
 		}
 		QCoreApplication::processEvents();
@@ -402,7 +401,7 @@ void TaskQueueWorker::onTaskAdded() {
 	_inTaskAdded = false;
 }
 
-SendingAlbum::SendingAlbum() : groupId(rand_value<uint64>()) {
+SendingAlbum::SendingAlbum() : groupId(openssl::RandomValue<uint64>()) {
 }
 
 void SendingAlbum::fillMedia(
@@ -494,9 +493,8 @@ FileLoadTask::FileLoadTask(
 	SendMediaType type,
 	const FileLoadTo &to,
 	const TextWithTags &caption,
-	std::shared_ptr<SendingAlbum> album,
-	MsgId msgIdToEdit)
-: _id(rand_value<uint64>())
+	std::shared_ptr<SendingAlbum> album)
+: _id(openssl::RandomValue<uint64>())
 , _session(session)
 , _dcId(session->mainDcId())
 , _to(to)
@@ -505,10 +503,9 @@ FileLoadTask::FileLoadTask(
 , _content(content)
 , _information(std::move(information))
 , _type(type)
-, _caption(caption)
-, _msgIdToEdit(msgIdToEdit) {
+, _caption(caption) {
 	Expects(to.options.scheduled
-		|| (_msgIdToEdit == 0 || IsServerMsgId(_msgIdToEdit)));
+		|| (to.replaceMediaOf == 0 || IsServerMsgId(to.replaceMediaOf)));
 }
 
 FileLoadTask::FileLoadTask(
@@ -518,7 +515,7 @@ FileLoadTask::FileLoadTask(
 	const VoiceWaveform &waveform,
 	const FileLoadTo &to,
 	const TextWithTags &caption)
-: _id(rand_value<uint64>())
+: _id(openssl::RandomValue<uint64>())
 , _session(session)
 , _dcId(session->mainDcId())
 , _to(to)
@@ -689,8 +686,6 @@ void FileLoadTask::process(Args &&args) {
 		_to,
 		_caption,
 		_album);
-
-	_result->edit = (_msgIdToEdit > 0);
 
 	QString filename, filemime;
 	qint64 filesize = 0;
@@ -875,7 +870,8 @@ void FileLoadTask::process(Args &&args) {
 				}
 			} else if (isAnimation) {
 				attributes.push_back(MTP_documentAttributeAnimated());
-			} else if (_type != SendMediaType::File) {
+			} else if (filemime.startsWith(u"image/"_q)
+				&& _type != SendMediaType::File) {
 				auto medium = (w > 320 || h > 320) ? fullimage.scaled(320, 320, Qt::KeepAspectRatio, Qt::SmoothTransformation) : fullimage;
 				auto full = (w > 1280 || h > 1280) ? fullimage.scaled(1280, 1280, Qt::KeepAspectRatio, Qt::SmoothTransformation) : fullimage;
 				{
@@ -890,13 +886,13 @@ void FileLoadTask::process(Args &&args) {
 					writer.write(full);
 				}
 				photoThumbs.emplace('m', PreparedPhotoThumb{ .image = medium });
-				photoSizes.push_back(MTP_photoSize(MTP_string("m"), MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)), MTP_int(medium.width()), MTP_int(medium.height()), MTP_int(0)));
+				photoSizes.push_back(MTP_photoSize(MTP_string("m"), MTP_int(medium.width()), MTP_int(medium.height()), MTP_int(0)));
 
 				photoThumbs.emplace('y', PreparedPhotoThumb{
 					.image = full,
 					.bytes = filedata
 				});
-				photoSizes.push_back(MTP_photoSize(MTP_string("y"), MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)), MTP_int(full.width()), MTP_int(full.height()), MTP_int(0)));
+				photoSizes.push_back(MTP_photoSize(MTP_string("y"), MTP_int(full.width()), MTP_int(full.height()), MTP_int(0)));
 
 				photo = MTP_photo(
 					MTP_flags(0),
@@ -957,6 +953,16 @@ void FileLoadTask::process(Args &&args) {
 		_type = SendMediaType::File;
 	}
 
+	if (_information) {
+		if (auto image = std::get_if<Ui::PreparedFileInformation::Image>(
+				&_information->media)) {
+			if (image->modifications.paint) {
+				_result->attachedStickers =
+					image->modifications.paint->attachedStickers();
+			}
+		}
+	}
+
 	_result->type = _type;
 	_result->filepath = _filepath;
 	_result->content = _content;
@@ -992,12 +998,7 @@ void FileLoadTask::finish() {
 			Ui::LayerOption::KeepOther);
 		removeFromAlbum();
 	} else if (const auto session = _session.get()) {
-		const auto fullId = _msgIdToEdit
-			? std::make_optional(FullMsgId(
-				peerToChannel(_to.peer),
-				_msgIdToEdit))
-			: std::nullopt;
-		Api::SendConfirmedFile(session, _result, fullId);
+		Api::SendConfirmedFile(session, _result);
 	}
 }
 

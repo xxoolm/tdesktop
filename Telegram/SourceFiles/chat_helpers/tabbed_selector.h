@@ -44,13 +44,14 @@ enum class SelectorTab {
 	Emoji,
 	Stickers,
 	Gifs,
+	Masks,
 };
 
 class EmojiListWidget;
 class StickersListWidget;
 class GifsListWidget;
 
-class TabbedSelector : public Ui::RpWidget, private base::Subscriber {
+class TabbedSelector : public Ui::RpWidget {
 public:
 	struct FileChosen {
 		not_null<DocumentData*> document;
@@ -63,7 +64,8 @@ public:
 	using InlineChosen = InlineBots::ResultSelected;
 	enum class Mode {
 		Full,
-		EmojiOnly
+		EmojiOnly,
+		MediaEditor,
 	};
 
 	TabbedSelector(
@@ -82,6 +84,7 @@ public:
 	rpl::producer<> cancelled() const;
 	rpl::producer<> checkForHide() const;
 	rpl::producer<> slideFinished() const;
+	rpl::producer<> contextMenuRequested() const;
 
 	void setRoundRadius(int radius);
 	void refreshStickers();
@@ -109,9 +112,7 @@ public:
 		_beforeHidingCallback = std::move(callback);
 	}
 
-	void setSendMenuType(Fn<SendMenu::Type()> &&callback) {
-		_sendMenuType = std::move(callback);
-	}
+	void showMenuWithType(SendMenu::Type type);
 
 	// Float player interface.
 	bool floatPlayerHandleWheelEvent(QEvent *e);
@@ -127,20 +128,20 @@ public:
 protected:
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
-	void contextMenuEvent(QContextMenuEvent *e) override;
 
 private:
 	class Tab {
 	public:
-		static constexpr auto kCount = 3;
-
-		Tab(SelectorTab type, object_ptr<Inner> widget);
+		Tab(SelectorTab type, int index, object_ptr<Inner> widget);
 
 		object_ptr<Inner> takeWidget();
 		void returnWidget(object_ptr<Inner> widget);
 
 		SelectorTab type() const {
 			return _type;
+		}
+		int index() const {
+			return _index;
 		}
 		Inner *widget() const {
 			return _weak;
@@ -158,7 +159,8 @@ private:
 		}
 
 	private:
-		SelectorTab _type = SelectorTab::Emoji;
+		const SelectorTab _type;
+		const int _index;
 		object_ptr<Inner> _widget = { nullptr };
 		QPointer<Inner> _weak;
 		object_ptr<InnerFooter> _footer;
@@ -167,7 +169,13 @@ private:
 	};
 
 	bool full() const;
-	Tab createTab(SelectorTab type);
+	bool mediaEditor() const;
+	bool tabbed() const;
+	bool hasEmojiTab() const;
+	bool hasStickersTab() const;
+	bool hasGifsTab() const;
+	bool hasMasksTab() const;
+	Tab createTab(SelectorTab type, int index);
 
 	void paintSlideFrame(Painter &p);
 	void paintContent(Painter &p);
@@ -184,25 +192,25 @@ private:
 	void showAll();
 	void hideForSliding();
 
+	SelectorTab typeByIndex(int index) const;
+	int indexByType(SelectorTab type) const;
+
 	bool hasSectionIcons() const;
 	void setWidgetToScrollArea();
 	void createTabsSlider();
+	void fillTabsSliderSections();
+	void updateTabsSliderGeometry();
 	void switchTab();
-	not_null<Tab*> getTab(SelectorTab type) {
-		return &_tabs[static_cast<int>(type)];
-	}
-	not_null<const Tab*> getTab(SelectorTab type) const {
-		return &_tabs[static_cast<int>(type)];
-	}
-	not_null<Tab*> currentTab() {
-		return getTab(_currentTabType);
-	}
-	not_null<const Tab*> currentTab() const {
-		return getTab(_currentTabType);
-	}
+
+	not_null<Tab*> getTab(int index);
+	not_null<const Tab*> getTab(int index) const;
+	not_null<Tab*> currentTab();
+	not_null<const Tab*> currentTab() const;
+
 	not_null<EmojiListWidget*> emoji() const;
 	not_null<StickersListWidget*> stickers() const;
 	not_null<GifsListWidget*> gifs() const;
+	not_null<StickersListWidget*> masks() const;
 
 	const not_null<Window::SessionController*> _controller;
 
@@ -220,15 +228,19 @@ private:
 	object_ptr<Ui::PlainShadow> _bottomShadow;
 	object_ptr<Ui::ScrollArea> _scroll;
 	object_ptr<Ui::FlatLabel> _restrictedLabel = { nullptr };
-	std::array<Tab, Tab::kCount> _tabs;
+	std::vector<Tab> _tabs;
 	SelectorTab _currentTabType = SelectorTab::Emoji;
+
+	const bool _hasEmojiTab;
+	const bool _hasStickersTab;
+	const bool _hasGifsTab;
+	const bool _hasMasksTab;
+	const bool _tabbed;
 
 	base::unique_qptr<Ui::PopupMenu> _menu;
 
 	Fn<void(SelectorTab)> _afterShownCallback;
 	Fn<void(SelectorTab)> _beforeHidingCallback;
-
-	Fn<SendMenu::Type()> _sendMenuType;
 
 	rpl::event_stream<> _showRequests;
 	rpl::event_stream<> _slideFinished;

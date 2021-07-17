@@ -25,7 +25,7 @@ class SessionController;
 namespace Media {
 namespace Player {
 
-class VolumeController : public Ui::RpWidget, private base::Subscriber {
+class VolumeController final : public Ui::RpWidget {
 public:
 	VolumeController(
 		QWidget *parent,
@@ -64,7 +64,7 @@ protected:
 
 	bool eventFilter(QObject *obj, QEvent *e) override;
 
-private slots:
+private Q_SLOTS:
 	void onShowStart();
 	void onHideStart();
 

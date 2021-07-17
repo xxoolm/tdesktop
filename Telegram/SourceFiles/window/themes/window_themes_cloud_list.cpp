@@ -271,8 +271,6 @@ void CloudListCheck::paintWithColors(
 	p.setBrush(_colors->sent);
 	p.drawRoundedRect(style::rtlrect(sent, outerWidth), radius, radius);
 
-	const auto skip = st::settingsThemeRadioBottom / 2;
-
 	const auto radio = _radio.getSize();
 	_radio.paint(
 		p,
@@ -342,9 +340,9 @@ void CloudList::setup() {
 	auto themeChanges = rpl::single(BackgroundUpdate(
 		BackgroundUpdate::Type::ApplyingTheme,
 		Background()->tile()
-	)) | rpl::then(base::ObservableViewer(
-		*Background()
-	)) | rpl::filter([](const BackgroundUpdate &update) {
+	)) | rpl::then(
+		Background()->updates()
+	) | rpl::filter([](const BackgroundUpdate &update) {
 		return (update.type == BackgroundUpdate::Type::ApplyingTheme);
 	});
 
@@ -475,12 +473,12 @@ bool CloudList::insertTillLimit(
 	}) - begin(_elements);
 	auto positionForBad = end(_elements) - begin(_elements);
 
-	auto insertElements = ranges::view::all(
+	auto insertElements = ranges::views::all(
 		list
-	) | ranges::view::filter([&](const Data::CloudTheme &theme) {
+	) | ranges::views::filter([&](const Data::CloudTheme &theme) {
 		const auto i = ranges::find(_elements, theme.id, &Element::id);
 		return (i == end(_elements));
-	}) | ranges::view::take(insertCount);
+	}) | ranges::views::take(insertCount);
 
 	for (const auto &theme : insertElements) {
 		const auto good = isGood(theme);
@@ -524,7 +522,9 @@ void CloudList::insert(int index, const Data::CloudTheme &theme) {
 		} else if (cloud.documentId) {
 			_window->session().data().cloudThemes().applyFromDocument(cloud);
 		} else {
-			_window->session().data().cloudThemes().showPreview(cloud);
+			_window->session().data().cloudThemes().showPreview(
+				&_window->window(),
+				cloud);
 		}
 	});
 	auto &element = *_elements.insert(
@@ -665,7 +665,7 @@ void CloudList::subscribeToDownloadFinished() {
 	}
 	_window->session().downloaderTaskFinished(
 	) | rpl::start_with_next([=] {
-		auto &&waiting = _elements | ranges::view::filter(&Element::waiting);
+		auto &&waiting = _elements | ranges::views::filter(&Element::waiting);
 		const auto still = ranges::count_if(waiting, [&](Element &element) {
 			if (!element.media) {
 				element.waiting = false;
@@ -706,7 +706,6 @@ void CloudList::updateGeometry() {
 }
 
 int CloudList::resizeGetHeight(int newWidth) {
-	const auto desired = st::settingsThemePreviewSize.width();
 	const auto minSkip = st::settingsThemeMinSkip;
 	const auto single = std::min(
 		st::settingsThemePreviewSize.width(),

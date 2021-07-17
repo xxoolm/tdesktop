@@ -35,13 +35,14 @@ class SessionController;
 
 namespace Ui {
 class PopupMenu;
+enum class ReportReason;
+class PathShiftGradient;
 } // namespace Ui
 
 class HistoryWidget;
 class HistoryInner
 	: public Ui::RpWidget
-	, public Ui::AbstractTooltipShower
-	, private base::Subscriber {
+	, public Ui::AbstractTooltipShower {
 	// The Q_OBJECT meta info is used for qobject_cast!
 	Q_OBJECT
 
@@ -84,10 +85,18 @@ public:
 		int till) const;
 	void elementStartStickerLoop(not_null<const Element*> view);
 	[[nodiscard]] crl::time elementHighlightTime(
-		not_null<const Element*> view);
+		not_null<const HistoryItem*> item);
 	void elementShowPollResults(
 		not_null<PollData*> poll,
 		FullMsgId context);
+	void elementOpenPhoto(
+		not_null<PhotoData*> photo,
+		FullMsgId context);
+	void elementOpenDocument(
+		not_null<DocumentData*> document,
+		FullMsgId context,
+		bool showInMediaView = false);
+	void elementCancelUpload(const FullMsgId &context);
 	void elementShowTooltip(
 		const TextWithEntities &text,
 		Fn<void()> hiddenCallback);
@@ -96,6 +105,8 @@ public:
 		const QString &command,
 		const FullMsgId &context);
 	void elementHandleViaClick(not_null<UserData*> bot);
+	bool elementIsChatWide();
+	not_null<Ui::PathShiftGradient*> elementPathShiftGradient();
 
 	void updateBotInfo(bool recount = true);
 
@@ -110,6 +121,9 @@ public:
 	int migratedTop() const;
 	int historyTop() const;
 	int historyDrawTop() const;
+
+	void setChooseReportReason(Ui::ReportReason reason);
+	void clearChooseReportReason();
 
 	// -1 if should not be visible, -2 if bad history()
 	int itemTop(const HistoryItem *item) const;
@@ -148,7 +162,7 @@ protected:
 	void keyPressEvent(QKeyEvent *e) override;
 	void contextMenuEvent(QContextMenuEvent *e) override;
 
-public slots:
+public Q_SLOTS:
 	void onParentGeometryChanged();
 
 	void onTouchSelect();
@@ -213,8 +227,6 @@ private:
 	// if it returns false the enumeration stops immidiately.
 	template <typename Method>
 	void enumerateDates(Method method);
-
-	ClickHandlerPtr hiddenUserpicLink(FullMsgId id);
 
 	void scrollDateCheck();
 	void scrollDateHideByTimer();
@@ -314,6 +326,7 @@ private:
 	void deleteAsGroup(FullMsgId itemId);
 	void reportItem(FullMsgId itemId);
 	void reportAsGroup(FullMsgId itemId);
+	void reportItems(MessageIdsList ids);
 	void blockSenderItem(FullMsgId itemId);
 	void blockSenderAsGroup(FullMsgId itemId);
 	void copySelectedText();
@@ -352,6 +365,10 @@ private:
 
 	style::cursor _cursor = style::cur_default;
 	SelectedItems _selected;
+	std::optional<Ui::ReportReason> _chooseForReportReason;
+
+	const std::unique_ptr<Ui::PathShiftGradient> _pathGradient;
+	bool _isChatWide = false;
 
 	base::flat_set<not_null<const HistoryItem*>> _animatedStickersPlayed;
 	base::flat_map<

@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_sending.h"
 
 #include "api/api_text_entities.h"
+#include "base/openssl_help.h"
 #include "base/unixtime.h"
 #include "data/data_document.h"
 #include "data/data_photo.h"
@@ -76,7 +77,7 @@ void SendExistingMedia(
 	const auto newId = FullMsgId(
 		peerToChannel(peer->id),
 		session->data().nextLocalMessageId());
-	const auto randomId = rand_value<uint64>();
+	const auto randomId = openssl::RandomValue<uint64>();
 
 	auto flags = NewMessageFlags(peer) | MTPDmessage::Flag::f_media;
 	auto clientFlags = NewMessageClientFlags();
@@ -149,7 +150,7 @@ void SendExistingMedia(
 			)).done([=](const MTPUpdates &result) {
 				api->applyUpdates(result, randomId);
 				finish();
-			}).fail([=](const RPCError &error) {
+			}).fail([=](const MTP::Error &error) {
 				if (error.code() == 400
 					&& error.type().startsWith(qstr("FILE_REFERENCE_"))) {
 					api->refreshFileReference(origin, [=](const auto &result) {
@@ -249,7 +250,7 @@ bool SendDice(Api::MessageToSend &message) {
 	const auto newId = FullMsgId(
 		peerToChannel(peer->id),
 		session->data().nextLocalMessageId());
-	const auto randomId = rand_value<uint64>();
+	const auto randomId = openssl::RandomValue<uint64>();
 
 	auto &histories = history->owner().histories();
 	auto flags = NewMessageFlags(peer) | MTPDmessage::Flag::f_media;
@@ -303,7 +304,8 @@ bool SendDice(Api::MessageToSend &message) {
 			MTP_string(messagePostAuthor),
 			MTPlong(),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>()),
+			MTPVector<MTPRestrictionReason>(),
+			MTPint()), // ttl_period
 		clientFlags,
 		NewMessageType::Unread);
 
@@ -322,7 +324,7 @@ bool SendDice(Api::MessageToSend &message) {
 		)).done([=](const MTPUpdates &result) {
 			api->applyUpdates(result, randomId);
 			finish();
-		}).fail([=](const RPCError &error) {
+		}).fail([=](const MTP::Error &error) {
 			api->sendMessageFail(error, peer, randomId, newId);
 			finish();
 		}).afterRequest(history->sendRequestId
@@ -342,13 +344,15 @@ void FillMessagePostFlags(
 
 void SendConfirmedFile(
 		not_null<Main::Session*> session,
-		const std::shared_ptr<FileLoadResult> &file,
-		const std::optional<FullMsgId> &oldId) {
-	const auto isEditing = oldId.has_value();
+		const std::shared_ptr<FileLoadResult> &file) {
+	const auto isEditing = file->to.replaceMediaOf != 0;
 	const auto channelId = peerToChannel(file->to.peer);
 
-	const auto newId = oldId.value_or(
-		FullMsgId(channelId, session->data().nextLocalMessageId()));
+	const auto newId = FullMsgId(
+		channelId,
+		isEditing
+			? file->to.replaceMediaOf
+			: session->data().nextLocalMessageId());
 	auto groupId = file->album ? file->album->groupId : uint64(0);
 	if (file->album) {
 		const auto proj = [](const SendingAlbum::Item &item) {
@@ -359,7 +363,6 @@ void SendConfirmedFile(
 
 		it->msgId = newId;
 	}
-	file->edit = isEditing;
 	session->uploader().upload(newId, file);
 
 	const auto itemToEdit = isEditing
@@ -452,7 +455,8 @@ void SendConfirmedFile(
 			MTP_string(messagePostAuthor),
 			MTP_long(groupId),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>());
+			MTPVector<MTPRestrictionReason>(),
+			MTPint()); // ttl_period
 
 		if (itemToEdit) {
 			itemToEdit->savePreviousMedia();
@@ -490,7 +494,8 @@ void SendConfirmedFile(
 			MTP_string(messagePostAuthor),
 			MTP_long(groupId),
 			//MTPMessageReactions(),
-			MTPVector<MTPRestrictionReason>());
+			MTPVector<MTPRestrictionReason>(),
+			MTPint()); // ttl_period
 
 		if (itemToEdit) {
 			itemToEdit->savePreviousMedia();
@@ -532,7 +537,8 @@ void SendConfirmedFile(
 				MTP_string(messagePostAuthor),
 				MTP_long(groupId),
 				//MTPMessageReactions(),
-				MTPVector<MTPRestrictionReason>()),
+				MTPVector<MTPRestrictionReason>(),
+				MTPint()), // ttl_period
 			clientFlags,
 			NewMessageType::Unread);
 		// Voices can't be edited.

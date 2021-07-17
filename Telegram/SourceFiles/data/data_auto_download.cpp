@@ -24,7 +24,7 @@ constexpr auto kVersion = char(2);
 
 template <typename Enum>
 auto enums_view(int from, int till) {
-	using namespace ranges::view;
+	using namespace ranges::views;
 	return ints(from, till) | transform([](int index) {
 		return static_cast<Enum>(index);
 	});
@@ -283,7 +283,6 @@ bool Should(
 	if (document->sticker()) {
 		return true;
 	}
-	const auto size = document->size;
 	return Should(data, Source::User, document)
 		|| Should(data, Source::Group, document)
 		|| Should(data, Source::Channel, document);
