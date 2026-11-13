@@ -7,12 +7,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/boxes/confirm_phone_box.h"
 
+#include "core/file_utilities.h"
 #include "ui/boxes/confirm_box.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
 #include "ui/text/format_values.h" // Ui::FormatPhone
 #include "ui/text/text_utilities.h"
 #include "lang/lang_keys.h"
+#include "styles/style_edit_peer_members.h"
 #include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 
@@ -22,10 +24,18 @@ ConfirmPhoneBox::ConfirmPhoneBox(
 	QWidget*,
 	const QString &phone,
 	int codeLength,
+	const QString &openUrl,
 	std::optional<int> timeout)
 : _phone(phone)
 , _sentCodeLength(codeLength)
-, _call([this] { sendCall(); }, [this] { update(); }) {
+, _call([=] { sendCall(); }, [=] { update(); }) {
+	if (!openUrl.isEmpty()) {
+		_fragment.create(
+			this,
+			tr::lng_intro_fragment_button(),
+			st::fragmentBoxButton);
+		_fragment->setClickedCallback([=] { File::OpenUrl(openUrl); });
+	}
 	if (timeout) {
 		_call.setStatus({ Ui::SentCodeCall::State::Waiting, *timeout });
 	}
@@ -40,9 +50,10 @@ void ConfirmPhoneBox::prepare() {
 		this,
 		tr::lng_confirm_phone_about(
 			lt_phone,
-			rpl::single(Ui::Text::Bold(Ui::FormatPhone(_phone))),
-			Ui::Text::WithEntities),
+			rpl::single(tr::bold(Ui::FormatPhone(_phone))),
+			tr::marked),
 		st::confirmPhoneAboutLabel);
+	_about->resizeToWidth(st::boxWidth - 2 * st::usernamePadding.left());
 
 	_code.create(this, st::confirmPhoneCodeField, tr::lng_code_ph());
 	_code->setAutoSubmit(_sentCodeLength, [=] { sendCode(); });
@@ -59,9 +70,11 @@ void ConfirmPhoneBox::prepare() {
 			+ _code->height()
 			+ st::usernameSkip
 			+ _about->height()
-			+ st::usernameSkip);
+			+ st::usernameSkip
+			+ (_fragment ? (_fragment->height() + fragmentSkip()) : 0));
 
-	connect(_code, &Ui::InputField::submitted, [=] { sendCode(); });
+	_code->submits(
+	) | rpl::on_next([=] { sendCode(); }, _code->lifetime());
 
 	showChildren();
 }
@@ -96,7 +109,7 @@ void ConfirmPhoneBox::showError(const QString &error) {
 void ConfirmPhoneBox::paintEvent(QPaintEvent *e) {
 	BoxContent::paintEvent(e);
 
-	Painter p(this);
+	auto p = QPainter(this);
 
 	p.setFont(st::boxTextFont);
 	const auto callText = _call.getText();
@@ -132,13 +145,25 @@ void ConfirmPhoneBox::resizeEvent(QResizeEvent *e) {
 		_code->height());
 	_code->moveToLeft(st::usernamePadding.left(), st::usernamePadding.top());
 
-	_about->moveToLeft(
-		st::usernamePadding.left(),
-		_code->y() + _code->height() + st::usernameSkip);
+	if (_fragment) {
+		_fragment->setFullWidth(_code->width());
+		_fragment->moveToLeft(
+			(width() - _fragment->width()) / 2,
+			_code->y() + _code->height() + st::usernameSkip);
+	}
+
+	const auto aboutTop = _fragment
+		? (_fragment->y() + _fragment->height() + fragmentSkip())
+		: (_code->y() + _code->height() + st::usernameSkip);
+	_about->moveToLeft(st::usernamePadding.left(), aboutTop);
 }
 
 void ConfirmPhoneBox::setInnerFocus() {
 	_code->setFocusFast();
+}
+
+int ConfirmPhoneBox::fragmentSkip() const {
+	return st::usernamePadding.bottom();
 }
 
 rpl::producer<QString> ConfirmPhoneBox::checkRequests() const {
@@ -158,10 +183,6 @@ void ConfirmPhoneBox::showServerError(const QString &text) {
 	_code->setDisabled(false);
 	_code->setFocus();
 	showError(text);
-}
-
-QString ConfirmPhoneBox::getPhone() const {
-	return _phone;
 }
 
 } // namespace Ui

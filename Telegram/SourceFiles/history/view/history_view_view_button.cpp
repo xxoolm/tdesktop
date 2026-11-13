@@ -7,220 +7,287 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_view_button.h"
 
+#include "boxes/gift_premium_box.h"
 #include "core/application.h"
 #include "core/click_handler_types.h"
-#include "data/data_cloud_themes.h"
 #include "data/data_session.h"
-#include "data/data_sponsored_messages.h"
-#include "data/data_user.h"
-#include "data/data_web_page.h"
+#include "history/history.h"
+#include "history/history_item_components.h"
 #include "history/view/history_view_cursor_state.h"
+#include "iv/iv_instance.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
-#include "ui/click_handler.h"
 #include "ui/effects/ripple_animation.h"
-#include "ui/round_rect.h"
-#include "ui/text/text_utilities.h" // Ui::Text::ToUpper
+#include "ui/painter.h"
 #include "window/window_session_controller.h"
 #include "styles/style_chat.h"
-#include "styles/style_widgets.h"
-#include "styles/style_window.h"
 
 namespace HistoryView {
 namespace {
 
-inline auto PeerToPhrase(not_null<PeerData*> peer) {
-	const auto phrase = [&] {
-		if (const auto user = peer->asUser()) {
-			return user->isBot()
-				? tr::lng_view_button_bot
-				: tr::lng_view_button_user;
-		} else if (peer->isChat()) {
-			return tr::lng_view_button_group;
-		} else if (peer->isChannel()) {
-			return tr::lng_view_button_channel;
+[[nodiscard]] ClickHandlerPtr MakeMediaButtonClickHandler(
+		not_null<Data::Media*> media) {
+	const auto start = media->giveawayStart();
+	const auto results = media->giveawayResults();
+	Assert(start || results);
+
+	const auto peer = media->parent()->history()->peer;
+	const auto messageId = media->parent()->id;
+	if (media->parent()->isSending() || media->parent()->hasFailed()) {
+		return nullptr;
+	}
+	const auto maybeStart = start
+		? *start
+		: std::optional<Data::GiveawayStart>();
+	const auto maybeResults = results
+		? *results
+		: std::optional<Data::GiveawayResults>();
+	return std::make_shared<LambdaClickHandler>([=](
+			ClickContext context) {
+		const auto my = context.other.value<ClickHandlerContext>();
+		const auto controller = my.sessionWindow.get();
+		if (!controller) {
+			return;
 		}
-		Unexpected("Invalid peer in ViewButton.");
-	}()(tr::now);
-	return Ui::Text::Upper(phrase);
+		ResolveGiveawayInfo(
+			controller,
+			peer,
+			messageId,
+			maybeStart,
+			maybeResults);
+	});
 }
 
-inline auto WebPageToPhrase(not_null<WebPageData*> webpage) {
-	const auto type = webpage->type;
-	return Ui::Text::Upper((type == WebPageType::Theme)
-		? tr::lng_view_button_theme(tr::now)
-		: (type == WebPageType::Message)
-		? tr::lng_view_button_message(tr::now)
-		: (type == WebPageType::Group)
-		? tr::lng_view_button_group(tr::now)
-		: (type == WebPageType::WallPaper)
-		? tr::lng_view_button_background(tr::now)
-		: (type == WebPageType::Channel)
-		? tr::lng_view_button_channel(tr::now)
-		: (type == WebPageType::GroupWithRequest
-			|| type == WebPageType::ChannelWithRequest)
-		? tr::lng_view_button_request_join(tr::now)
-		: (type == WebPageType::VoiceChat)
-		? tr::lng_view_button_voice_chat(tr::now)
-		: (type == WebPageType::Livestream)
-		? tr::lng_view_button_voice_chat_channel(tr::now)
-		: (type == WebPageType::Bot)
-		? tr::lng_view_button_bot(tr::now)
-		: (type == WebPageType::User)
-		? tr::lng_view_button_user(tr::now)
-		: QString());
+[[nodiscard]] QString MakeMediaButtonText(not_null<Data::Media*> media) {
+	Expects(media->giveawayStart() || media->giveawayResults());
+
+	return tr::lng_prizes_how_works(tr::now, tr::upper);
+}
+
+[[nodiscard]] ClickHandlerPtr MakeRichMessageButtonClickHandler(
+		FullMsgId itemId) {
+	return std::make_shared<LambdaClickHandler>([=](ClickContext context) {
+		const auto my = context.other.value<ClickHandlerContext>();
+		const auto controller = my.sessionWindow.get();
+		const auto item = controller
+			? controller->session().data().message(itemId)
+			: nullptr;
+		if (!controller || !item) {
+			return;
+		}
+		Core::App().iv().showRichMessage(controller, not_null{ item });
+	});
+}
+
+[[nodiscard]] QString MakeRichMessageButtonText() {
+	return tr::lng_view_button_full_article(tr::now);
 }
 
 } // namespace
 
 struct ViewButton::Inner {
-	Inner(not_null<PeerData*> peer, Fn<void()> updateCallback);
-	Inner(not_null<Data::Media*> media, Fn<void()> updateCallback);
-	void updateMask(int height);
-	void toggleRipple(bool pressed);
+	Inner(
+		not_null<Data::Media*> media,
+		uint8 colorIndex,
+		Fn<void()> updateCallback);
+	Inner(
+		FullMsgId itemId,
+		uint8 colorIndex,
+		Fn<void()> updateCallback);
 
+	void createRipple(int height);
+	void toggleRipple(bool pressed, int height);
+
+	const Kind kind;
 	const style::margins &margins;
 	const ClickHandlerPtr link;
 	const Fn<void()> updateCallback;
-	bool underDate = true;
-	int lastWidth = 0;
+	Data::Media *media = nullptr;
+	FullMsgId itemId;
+	uint32 lastWidth : 24 = 0;
+	uint32 colorIndex : 6 = 0;
+	uint32 aboveInfo : 1 = 0;
+	uint32 externalLink : 1 = 0;
 	QPoint lastPoint;
 	std::unique_ptr<Ui::RippleAnimation> ripple;
 	Ui::Text::String text;
 };
 
 bool ViewButton::MediaHasViewButton(not_null<Data::Media*> media) {
-	return media->webpage()
-		? MediaHasViewButton(media->webpage())
-		: false;
-}
-
-bool ViewButton::MediaHasViewButton(
-		not_null<WebPageData*> webpage) {
-	const auto type = webpage->type;
-	return (type == WebPageType::Message)
-		|| (type == WebPageType::Group)
-		|| (type == WebPageType::Channel)
-		// || (type == WebPageType::Bot)
-		// || (type == WebPageType::User)
-		|| (type == WebPageType::VoiceChat)
-		|| (type == WebPageType::Livestream)
-		|| ((type == WebPageType::Theme)
-			&& webpage->document
-			&& webpage->document->isTheme())
-		|| ((type == WebPageType::WallPaper)
-			&& webpage->document
-			&& webpage->document->isWallPaper());
-}
-
-ViewButton::Inner::Inner(not_null<PeerData*> peer, Fn<void()> updateCallback)
-: margins(st::historyViewButtonMargins)
-, link(std::make_shared<LambdaClickHandler>([=](ClickContext context) {
-	const auto my = context.other.value<ClickHandlerContext>();
-	if (const auto controller = my.sessionWindow.get()) {
-		const auto &data = controller->session().data();
-		controller->showPeer(
-			peer,
-			data.sponsoredMessages().channelPost(my.itemId));
-	}
-}))
-, updateCallback(std::move(updateCallback))
-, text(st::historyViewButtonTextStyle, PeerToPhrase(peer)) {
+	return media->giveawayStart() || media->giveawayResults();
 }
 
 ViewButton::Inner::Inner(
 	not_null<Data::Media*> media,
+	uint8 colorIndex,
 	Fn<void()> updateCallback)
-: margins(st::historyViewButtonMargins)
-, link(std::make_shared<LambdaClickHandler>([=](ClickContext context) {
-	const auto my = context.other.value<ClickHandlerContext>();
-	if (const auto controller = my.sessionWindow.get()) {
-		const auto webpage = media->webpage();
-		if (!webpage) {
-			return;
-		}
-		HiddenUrlClickHandler::Open(webpage->url, context.other);
-	}
-}))
+: kind(Kind::Giveaway)
+, margins(st::historyViewButtonMargins)
+, link(MakeMediaButtonClickHandler(media))
 , updateCallback(std::move(updateCallback))
-, underDate(false)
-, text(st::historyViewButtonTextStyle, WebPageToPhrase(media->webpage())) {
+, media(media)
+, colorIndex(colorIndex)
+, aboveInfo(1)
+, text(st::historyViewButtonTextStyle, MakeMediaButtonText(media)) {
 }
 
-void ViewButton::Inner::updateMask(int height) {
+ViewButton::Inner::Inner(
+	FullMsgId itemId,
+	uint8 colorIndex,
+	Fn<void()> updateCallback)
+: kind(Kind::RichMessage)
+, margins(st::historyViewButtonMargins)
+, link(MakeRichMessageButtonClickHandler(itemId))
+, updateCallback(std::move(updateCallback))
+, itemId(itemId)
+, colorIndex(colorIndex)
+, aboveInfo(1)
+, text(st::historyViewButtonTextStyle, MakeRichMessageButtonText()) {
+}
+
+void ViewButton::Inner::createRipple(int height) {
+	const auto radius = (kind == Kind::RichMessage)
+		? st::historyPagePreview.radius
+		: st::roundRadiusLarge;
 	ripple = std::make_unique<Ui::RippleAnimation>(
 		st::defaultRippleAnimation,
-		Ui::RippleAnimation::roundRectMask(
+		Ui::RippleAnimation::RoundRectMask(
 			QSize(lastWidth, height - margins.top() - margins.bottom()),
-			st::roundRadiusLarge),
+			radius),
 		updateCallback);
 }
 
-void ViewButton::Inner::toggleRipple(bool pressed) {
-	if (ripple) {
-		if (pressed) {
-			ripple->add(lastPoint);
-		} else {
-			ripple->lastStop();
+void ViewButton::Inner::toggleRipple(bool pressed, int height) {
+	if (pressed) {
+		if (!ripple) {
+			createRipple(height);
 		}
+		ripple->add(lastPoint);
+	} else if (ripple) {
+		ripple->lastStop();
 	}
-}
-
-ViewButton::ViewButton(not_null<PeerData*> peer, Fn<void()> updateCallback)
-: _inner(std::make_unique<Inner>(peer, std::move(updateCallback))) {
 }
 
 ViewButton::ViewButton(
 	not_null<Data::Media*> media,
+	uint8 colorIndex,
 	Fn<void()> updateCallback)
-: _inner(std::make_unique<Inner>(media, std::move(updateCallback))) {
+: _inner(std::make_unique<Inner>(
+	media,
+	colorIndex,
+	std::move(updateCallback))) {
+}
+
+ViewButton::ViewButton(
+		FullMsgId itemId,
+		uint8 colorIndex,
+		Fn<void()> updateCallback)
+: _inner(std::make_unique<Inner>(
+	itemId,
+	colorIndex,
+	std::move(updateCallback))) {
 }
 
 ViewButton::~ViewButton() {
 }
 
+bool ViewButton::matches(not_null<Data::Media*> media) const {
+	return (_inner->kind == Kind::Giveaway) && (_inner->media == media);
+}
+
+bool ViewButton::matches(FullMsgId itemId) const {
+	return (_inner->kind == Kind::RichMessage) && (_inner->itemId == itemId);
+}
+
 void ViewButton::resized() const {
-	_inner->updateMask(height());
+	if (_inner->ripple) {
+		_inner->createRipple(height());
+	}
 }
 
 int ViewButton::height() const {
-	return st::historyViewButtonHeight;
+	return (_inner->kind == Kind::RichMessage)
+		? (st::historyPageButtonHeight
+			+ _inner->margins.top()
+			+ _inner->margins.bottom())
+		: st::historyViewButtonHeight;
+}
+
+bool ViewButton::belowMessageInfo() const {
+	return !_inner->aboveInfo;
 }
 
 void ViewButton::draw(
 		Painter &p,
 		const QRect &r,
 		const Ui::ChatPaintContext &context) {
+	const auto st = context.st;
 	const auto stm = context.messageStyle();
-
-	if (_inner->ripple && !_inner->ripple->empty()) {
-		const auto opacity = p.opacity();
-		p.setOpacity(st::historyPollRippleOpacity);
-		const auto colorOverride = &stm->msgWaveformInactive->c;
-		_inner->ripple->paint(p, r.left(), r.top(), r.width(), colorOverride);
-		p.setOpacity(opacity);
-	}
-
-	p.save();
-	{
+	const auto selected = context.selected();
+	const auto cache = context.outbg
+		? stm->replyCache[st->colorPatternIndex(_inner->colorIndex)].get()
+		: st->coloredReplyCache(selected, _inner->colorIndex).get();
+	if (_inner->kind == Kind::RichMessage) {
+		Ui::Text::ValidateQuotePaintCache(*cache, st::historyPagePreview);
+		Ui::Text::FillQuotePaint(p, r, *cache, st::historyPagePreview);
+		if (_inner->ripple) {
+			_inner->ripple->paint(p, r.left(), r.top(), r.width(), &cache->bg);
+			if (_inner->ripple->empty()) {
+				_inner->ripple = nullptr;
+			}
+		}
+		const auto padding = st::historyPageButtonPadding;
+		const auto availableWidth = r.width()
+			- padding.left()
+			- padding.right();
+		if (availableWidth > 0) {
+			const auto textWidth = (_inner->text.maxWidth() < availableWidth)
+				? _inner->text.maxWidth()
+				: availableWidth;
+			p.setPen(cache->icon);
+			_inner->text.drawElided(
+				p,
+				r.left()
+					+ padding.left()
+					+ (availableWidth - textWidth) / 2,
+				r.top() + padding.top(),
+				textWidth,
+				1,
+				style::al_top);
+		}
+	} else {
+		const auto radius = st::historyPagePreview.radius;
+		if (_inner->ripple) {
+			_inner->ripple->paint(p, r.left(), r.top(), r.width(), &cache->bg);
+			if (_inner->ripple->empty()) {
+				_inner->ripple = nullptr;
+			}
+		}
 		PainterHighQualityEnabler hq(p);
-		auto pen = stm->fwdTextPalette.linkFg->p;
-		pen.setWidth(st::lineWidth);
-		p.setPen(pen);
-		p.setBrush(Qt::NoBrush);
-		const auto half = st::lineWidth / 2.;
-		const auto rf = QRectF(r).marginsRemoved({ half, half, half, half });
-		p.drawRoundedRect(rf, st::roundRadiusLarge, st::roundRadiusLarge);
+		p.setPen(Qt::NoPen);
+		p.setBrush(cache->bg);
+		p.drawRoundedRect(r, radius, radius);
 
+		p.setPen(cache->icon);
 		_inner->text.drawElided(
 			p,
 			r.left(),
 			r.top() + (r.height() - _inner->text.minHeight()) / 2,
 			r.width(),
 			1,
-			style::al_center);
+			style::al_top);
+
+		if (_inner->externalLink) {
+			const auto &icon = st::msgBotKbUrlIcon;
+			const auto padding = st::msgBotKbIconPadding;
+			icon.paint(
+				p,
+				r.left() + r.width() - icon.width() - padding,
+				r.top() + padding,
+				r.width(),
+				cache->icon);
+		}
 	}
-	p.restore();
 	if (_inner->lastWidth != r.width()) {
 		_inner->lastWidth = r.width();
 		resized();
@@ -235,7 +302,7 @@ bool ViewButton::checkLink(const ClickHandlerPtr &other, bool pressed) {
 	if (_inner->link != other) {
 		return false;
 	}
-	_inner->toggleRipple(pressed);
+	_inner->toggleRipple(pressed, height());
 	return true;
 }
 
@@ -247,15 +314,17 @@ bool ViewButton::getState(
 		return false;
 	}
 	outResult->link = _inner->link;
+	if (!_inner->ripple) {
+		_inner->lastWidth = g.width();
+	}
 	_inner->lastPoint = point - g.topLeft();
 	return true;
 }
 
 QRect ViewButton::countRect(const QRect &r) const {
-	const auto dateHeight = (_inner->underDate ? 0 : st::msgDateFont->height);
 	return QRect(
 		r.left(),
-		r.top() + r.height() - height() - dateHeight,
+		r.top() + r.height() - height(),
 		r.width(),
 		height()) - _inner->margins;
 }

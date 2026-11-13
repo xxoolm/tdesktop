@@ -10,23 +10,27 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/notifications_utilities.h"
 #include "window/window_session_controller.h"
 #include "base/platform/win/base_windows_co_task_mem.h"
+#include "base/platform/win/base_windows_rpcndr_h.h"
 #include "base/platform/win/base_windows_winrt.h"
 #include "base/platform/base_platform_info.h"
 #include "base/platform/win/wrl/wrl_module_h.h"
 #include "base/qthelp_url.h"
 #include "platform/win/windows_app_user_model_id.h"
 #include "platform/win/windows_toast_activator.h"
-#include "platform/win/windows_event_filter.h"
 #include "platform/win/windows_dlls.h"
 #include "platform/win/specific_win.h"
+#include "data/data_forum_topic.h"
+#include "data/data_saved_sublist.h"
+#include "data/data_peer.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "core/application.h"
 #include "core/core_settings.h"
+#include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "mainwindow.h"
 #include "windows_quiethours_h.h"
-#include "styles/style_chat.h"
+#include "styles/style_chat_helpers.h"
 
 #include <QtCore/QOperatingSystemVersion>
 
@@ -34,7 +38,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <shellapi.h>
 #include <strsafe.h>
 
-#ifndef __MINGW32__
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Data.Xml.Dom.h>
 #include <winrt/Windows.UI.Notifications.h>
@@ -45,13 +48,23 @@ using namespace winrt::Windows::UI::Notifications;
 using namespace winrt::Windows::Data::Xml::Dom;
 using namespace winrt::Windows::Foundation;
 using winrt::com_ptr;
-#endif // !__MINGW32__
 
 namespace Platform {
 namespace Notifications {
-
-#ifndef __MINGW32__
 namespace {
+
+constexpr auto kQuerySettingsEachMs = 1000;
+
+crl::time LastSettingsQueryMs/* = 0*/;
+
+[[nodiscard]] bool ShouldQuerySettings() {
+	const auto now = crl::now();
+	if (LastSettingsQueryMs > 0 && now <= LastSettingsQueryMs + kQuerySettingsEachMs) {
+		return false;
+	}
+	LastSettingsQueryMs = now;
+	return true;
+}
 
 [[nodiscard]] std::wstring NotificationTemplate(
 		QString id,
@@ -93,11 +106,7 @@ namespace {
 }
 
 bool init() {
-	if (!IsWindows8OrGreater()) {
-		return false;
-	}
-	if ((Dlls::SetCurrentProcessExplicitAppUserModelID == nullptr)
-		|| !base::WinRT::Supported()) {
+	if (!IsWindows8OrGreater() || !base::WinRT::Supported()) {
 		return false;
 	}
 
@@ -108,13 +117,21 @@ bool init() {
 			LOG(("App Error: Object registration failed."));
 		}
 	}
-	if (!AppUserModelId::validateShortcut()) {
+	if (!AppUserModelId::ValidateShortcut()) {
 		LOG(("App Error: Shortcut validation failed."));
 		return false;
 	}
 
-	auto appUserModelId = AppUserModelId::getId();
-	if (!SUCCEEDED(Dlls::SetCurrentProcessExplicitAppUserModelID(appUserModelId))) {
+	PWSTR appUserModelId = {};
+	if (!SUCCEEDED(GetCurrentProcessExplicitAppUserModelID(&appUserModelId))) {
+		return false;
+	}
+
+	const auto appUserModelIdGuard = gsl::finally([&] {
+		CoTaskMemFree(appUserModelId);
+	});
+
+	if (AppUserModelId::Id() != appUserModelId) {
 		return false;
 	}
 	return true;
@@ -260,19 +277,81 @@ bool FocusAssistBlocks = false;
 
 // Thanks https://www.withinrafael.com/2019/09/19/determine-if-your-app-is-in-a-focus-assist-profiles-priority-list/
 void QueryFocusAssist() {
+	static auto unavailable = false;
+	if (unavailable) {
+		return;
+	}
+	auto error = HRESULT();
 	const auto quietHoursSettings = base::WinRT::TryCreateInstance<
 		IQuietHoursSettings
-	>(CLSID_QuietHoursSettings, CLSCTX_LOCAL_SERVER);
+	>(CLSID_QuietHoursSettings, CLSCTX_LOCAL_SERVER, nullptr, &error);
 	if (!quietHoursSettings) {
+		if (error == REGDB_E_CLASSNOTREG) {
+			unavailable = true;
+			LOG(("Focus Assist: Class not registered, "
+				"disabling queries until restart."));
+		}
+		if (FocusAssistBlocks) {
+			LOG(("Focus Assist: Unavailable."));
+			FocusAssistBlocks = false;
+		}
 		return;
 	}
 
-	auto profileId = base::CoTaskMemString();
-	auto hr = quietHoursSettings->get_UserSelectedProfile(profileId.put());
-	if (FAILED(hr) || !profileId) {
+	// On Windows 11 UserSelectedProfile stays unrestricted while Focus
+	// sessions, Do Not Disturb or automatic rules are active, so check
+	// ActiveProfile and the active quiet moment profile as well and use
+	// the most restrictive of them.
+	auto active = base::CoTaskMemString();
+	auto moment = base::CoTaskMemString();
+	auto selected = base::CoTaskMemString();
+	const auto valid = [](const base::CoTaskMemString &id) {
+		return id && *id.data();
+	};
+	const auto restrictiveness = [](const QString &name) {
+		return name.endsWith(".alarmsonly", Qt::CaseInsensitive)
+			? 2
+			: name.endsWith(".priorityonly", Qt::CaseInsensitive)
+			? 1
+			: 0;
+	};
+	auto profileId = LPWSTR();
+	auto profileName = QString();
+	const auto consider = [&](const base::CoTaskMemString &id) {
+		if (!valid(id)) {
+			return;
+		}
+		const auto name = QString::fromWCharArray(id.data());
+		if (!profileId
+			|| restrictiveness(name) > restrictiveness(profileName)) {
+			profileId = id.data();
+			profileName = name;
+		}
+	};
+	if (SUCCEEDED(quietHoursSettings->get_ActiveProfile(active.put()))) {
+		consider(active);
+	}
+	com_ptr<IQuietMomentsManager> moments;
+	auto momentId = UINT32();
+	if (SUCCEEDED(quietHoursSettings->get_QuietMomentsManager(moments.put()))
+		&& moments
+		&& SUCCEEDED(moments->GetActiveQuietMoment(&momentId))
+		&& momentId != 0
+		&& SUCCEEDED(quietHoursSettings->get_ActiveQuietMomentProfile(
+			moment.put()))) {
+		consider(moment);
+	}
+	if (SUCCEEDED(quietHoursSettings->get_UserSelectedProfile(
+			selected.put()))) {
+		consider(selected);
+	}
+	if (!profileId) {
+		if (FocusAssistBlocks) {
+			LOG(("Focus Assist: No profile."));
+			FocusAssistBlocks = false;
+		}
 		return;
 	}
-	const auto profileName = QString::fromWCharArray(profileId.data());
 	if (profileName.endsWith(".alarmsonly", Qt::CaseInsensitive)) {
 		if (!FocusAssistBlocks) {
 			LOG(("Focus Assist: Alarms Only."));
@@ -290,7 +369,7 @@ void QueryFocusAssist() {
 		}
 		return;
 	}
-	const auto appUserModelId = std::wstring(AppUserModelId::getId());
+	const auto appUserModelId = AppUserModelId::Id();
 	auto blocked = true;
 	const auto guard = gsl::finally([&] {
 		if (FocusAssistBlocks != blocked) {
@@ -303,7 +382,7 @@ void QueryFocusAssist() {
 	});
 
 	com_ptr<IQuietHoursProfile> profile;
-	hr = quietHoursSettings->GetProfile(profileId.data(), profile.put());
+	auto hr = quietHoursSettings->GetProfile(profileId, profile.put());
 	if (FAILED(hr) || !profile) {
 		return;
 	}
@@ -333,52 +412,62 @@ void QueryUserNotificationState() {
 	}
 }
 
-static constexpr auto kQuerySettingsEachMs = 1000;
-crl::time LastSettingsQueryMs = 0;
-
 void QuerySystemNotificationSettings() {
-	auto ms = crl::now();
-	if (LastSettingsQueryMs > 0 && ms <= LastSettingsQueryMs + kQuerySettingsEachMs) {
+	if (!ShouldQuerySettings()) {
 		return;
 	}
-	LastSettingsQueryMs = ms;
 	QueryQuietHours();
 	QueryFocusAssist();
 	QueryUserNotificationState();
 }
 
-} // namespace
-#endif // !__MINGW32__
-
-bool SkipAudioForCustom() {
+bool SkipSoundForCustom() {
 	QuerySystemNotificationSettings();
 
 	return (UserNotificationState == QUNS_NOT_PRESENT)
 		|| (UserNotificationState == QUNS_PRESENTATION_MODE)
+		|| (FocusAssistBlocks && Core::App().settings().skipToastsInFocus())
 		|| Core::App().screenIsLocked();
-}
-
-bool SkipToastForCustom() {
-	QuerySystemNotificationSettings();
-
-	return (UserNotificationState == QUNS_PRESENTATION_MODE)
-		|| (UserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN);
 }
 
 bool SkipFlashBounceForCustom() {
 	return SkipToastForCustom();
 }
 
+} // namespace
+
+void MaybePlaySoundForCustom(Fn<void()> playSound) {
+	if (!SkipSoundForCustom()) {
+		playSound();
+	}
+}
+
+bool SkipToastForCustom() {
+	QuerySystemNotificationSettings();
+
+	return (UserNotificationState == QUNS_PRESENTATION_MODE)
+		|| (UserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN)
+		|| (FocusAssistBlocks && Core::App().settings().skipToastsInFocus());
+}
+
+void MaybeFlashBounceForCustom(Fn<void()> flashBounce) {
+	if (!SkipFlashBounceForCustom()) {
+		flashBounce();
+	}
+}
+
+bool WaitForInputForCustom() {
+	QuerySystemNotificationSettings();
+
+	return UserNotificationState != QUNS_BUSY;
+}
+
 bool Supported() {
-#ifndef __MINGW32__
 	if (!Checked) {
 		Checked = true;
 		Check();
 	}
 	return InitSucceeded;
-#endif // !__MINGW32__
-
-	return false;
 }
 
 bool Enforced() {
@@ -389,37 +478,29 @@ bool ByDefault() {
 	return false;
 }
 
-void Create(Window::Notifications::System *system) {
-#ifndef __MINGW32__
-	if (Core::App().settings().nativeNotifications() && Supported()) {
-		auto result = std::make_unique<Manager>(system);
-		if (result->init()) {
-			system->setManager(std::move(result));
-			return;
-		}
-	}
-#endif // !__MINGW32__
-	system->setManager(nullptr);
+bool VolumeSupported() {
+	return true;
 }
 
-#ifndef __MINGW32__
+void Create(Window::Notifications::System *system) {
+	system->setManager([=] {
+		auto result = std::make_unique<Manager>(system);
+		return result->init() ? std::move(result) : nullptr;
+	});
+}
+
 class Manager::Private {
 public:
-	using Type = Window::Notifications::CachedUserpics::Type;
+	using Info = Window::Notifications::NativeManager::NotificationInfo;
 
-	explicit Private(Manager *instance, Type type);
+	explicit Private(Manager *instance);
 	bool init();
 
-	bool showNotification(
-		not_null<PeerData*> peer,
-		std::shared_ptr<Data::CloudImageView> &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options);
+	bool showNotification(Info &&info, Ui::PeerUserpicView &userpicView);
 	void clearAll();
 	void clearFromItem(not_null<HistoryItem*> item);
+	void clearFromTopic(not_null<Data::ForumTopic*> topic);
+	void clearFromSublist(not_null<Data::SavedSublist*> sublist);
 	void clearFromHistory(not_null<History*> history);
 	void clearFromSession(not_null<Main::Session*> session);
 	void beforeNotificationActivated(NotificationId id);
@@ -434,13 +515,9 @@ public:
 
 private:
 	bool showNotificationInTryCatch(
-		not_null<PeerData*> peer,
-		std::shared_ptr<Data::CloudImageView> &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options);
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView);
+	void tryHide(const ToastNotification &notification);
 	[[nodiscard]] std::wstring ensureSendButtonIcon();
 
 	Window::Notifications::CachedUserpics _cachedUserpics;
@@ -450,17 +527,16 @@ private:
 	ToastNotifier _notifier = nullptr;
 
 	base::flat_map<
-		FullPeer,
+		ContextId,
 		base::flat_map<MsgId, ToastNotification>> _notifications;
 	rpl::lifetime _lifetime;
 
 };
 
-Manager::Private::Private(Manager *instance, Type type)
-: _cachedUserpics(type)
-, _guarded(std::make_shared<Manager*>(instance)) {
+Manager::Private::Private(Manager *instance)
+: _guarded(std::make_shared<Manager*>(instance)) {
 	ToastActivations(
-	) | rpl::start_with_next([=](const ToastActivation &activation) {
+	) | rpl::on_next([=](const ToastActivation &activation) {
 		handleActivation(activation);
 	}, _lifetime);
 }
@@ -468,7 +544,7 @@ Manager::Private::Private(Manager *instance, Type type)
 bool Manager::Private::init() {
 	return base::WinRT::Try([&] {
 		_notifier = ToastNotificationManager::CreateToastNotifier(
-			AppUserModelId::getId());
+			AppUserModelId::Id());
 	});
 }
 
@@ -486,7 +562,7 @@ void Manager::Private::clearAll() {
 
 	for (const auto &[key, notifications] : base::take(_notifications)) {
 		for (const auto &[msgId, notification] : notifications) {
-			_notifier.Hide(notification);
+			tryHide(notification);
 		}
 	}
 }
@@ -496,10 +572,7 @@ void Manager::Private::clearFromItem(not_null<HistoryItem*> item) {
 		return;
 	}
 
-	auto i = _notifications.find(FullPeer{
-		.sessionId = item->history()->session().uniqueId(),
-		.peerId = item->history()->peer->id
-	});
+	auto i = _notifications.find(ItemContextId(item));
 	if (i == _notifications.cend()) {
 		return;
 	}
@@ -512,7 +585,44 @@ void Manager::Private::clearFromItem(not_null<HistoryItem*> item) {
 	if (i->second.empty()) {
 		_notifications.erase(i);
 	}
-	_notifier.Hide(taken);
+	tryHide(taken);
+}
+
+void Manager::Private::clearFromTopic(not_null<Data::ForumTopic*> topic) {
+	if (!_notifier) {
+		return;
+	}
+
+	const auto i = _notifications.find(ContextId{
+		.sessionId = topic->session().uniqueId(),
+		.peerId = topic->history()->peer->id,
+		.topicRootId = topic->rootId(),
+	});
+	if (i != _notifications.cend()) {
+		const auto temp = base::take(i->second);
+		_notifications.erase(i);
+
+		for (const auto &[msgId, notification] : temp) {
+			tryHide(notification);
+		}
+	}
+}
+
+void Manager::Private::clearFromSublist(
+		not_null<Data::SavedSublist*> sublist) {
+	if (!_notifier) {
+		return;
+	}
+
+	const auto i = _notifications.find(SublistContextId(sublist));
+	if (i != _notifications.cend()) {
+		const auto temp = base::take(i->second);
+		_notifications.erase(i);
+
+		for (const auto &[msgId, notification] : temp) {
+			tryHide(notification);
+		}
+	}
 }
 
 void Manager::Private::clearFromHistory(not_null<History*> history) {
@@ -520,16 +630,20 @@ void Manager::Private::clearFromHistory(not_null<History*> history) {
 		return;
 	}
 
-	auto i = _notifications.find(FullPeer{
-		.sessionId = history->session().uniqueId(),
-		.peerId = history->peer->id
+	const auto sessionId = history->session().uniqueId();
+	const auto peerId = history->peer->id;
+	auto i = _notifications.lower_bound(ContextId{
+		.sessionId = sessionId,
+		.peerId = peerId,
 	});
-	if (i != _notifications.cend()) {
+	while (i != _notifications.cend()
+		&& i->first.sessionId == sessionId
+		&& i->first.peerId == peerId) {
 		const auto temp = base::take(i->second);
-		_notifications.erase(i);
+		i = _notifications.erase(i);
 
 		for (const auto &[msgId, notification] : temp) {
-			_notifier.Hide(notification);
+			tryHide(notification);
 		}
 	}
 }
@@ -540,16 +654,15 @@ void Manager::Private::clearFromSession(not_null<Main::Session*> session) {
 	}
 
 	const auto sessionId = session->uniqueId();
-	for (auto i = _notifications.begin(); i != _notifications.end();) {
-		if (i->first.sessionId != sessionId) {
-			++i;
-			continue;
-		}
+	auto i = _notifications.lower_bound(ContextId{
+		.sessionId = sessionId,
+	});
+	while (i != _notifications.cend() && i->first.sessionId == sessionId) {
 		const auto temp = base::take(i->second);
-		_notifications.erase(i);
+		i = _notifications.erase(i);
 
 		for (const auto &[msgId, notification] : temp) {
-			_notifier.Hide(notification);
+			tryHide(notification);
 		}
 	}
 }
@@ -565,7 +678,7 @@ void Manager::Private::afterNotificationActivated(
 }
 
 void Manager::Private::clearNotification(NotificationId id) {
-	auto i = _notifications.find(id.full);
+	auto i = _notifications.find(id.contextId);
 	if (i != _notifications.cend()) {
 		i->second.remove(id.msgId);
 		if (i->second.empty()) {
@@ -584,18 +697,23 @@ void Manager::Private::handleActivation(const ToastActivation &activation) {
 			).arg(activation.args
 			).arg(my
 			).arg(pid));
-		psActivateProcess(pid);
+		const auto processId = pid;
+		const auto windowId = 0; // Activate some window.
+		Platform::ActivateOtherProcess(processId, windowId);
 		return;
 	}
 	const auto action = parsed.value("action");
 	const auto id = NotificationId{
-		.full = FullPeer{
+		.contextId = ContextId{
 			.sessionId = parsed.value("session").toULongLong(),
 			.peerId = PeerId(parsed.value("peer").toULongLong()),
+			.topicRootId = MsgId(parsed.value("topic").toLongLong()),
+			.monoforumPeerId = PeerId(
+					parsed.value("monoforumpeer").toULongLong()),
 		},
 		.msgId = MsgId(parsed.value("msg").toLongLong()),
 	};
-	if (!id.full.sessionId || !id.full.peerId || !id.msgId) {
+	if (!id.contextId.sessionId || !id.contextId.peerId || !id.msgId) {
 		DEBUG_LOG(("Toast Info: Got activation \"%1\", my %1, skipping."
 			).arg(activation.args
 			).arg(pid));
@@ -610,7 +728,7 @@ void Manager::Private::handleActivation(const ToastActivation &activation) {
 			text.text = entry.value;
 		}
 	}
-	const auto i = _notifications.find(id.full);
+	const auto i = _notifications.find(id.contextId);
 	if (i == _notifications.cend() || !i->second.contains(id.msgId)) {
 		return;
 	}
@@ -621,31 +739,21 @@ void Manager::Private::handleActivation(const ToastActivation &activation) {
 	} else if (action == "mark") {
 		manager->notificationReplied(id, TextWithTags());
 	} else {
-		manager->notificationActivated(id, text);
+		manager->notificationActivated(id, {
+			.draft = std::move(text),
+		});
 	}
 }
 
 bool Manager::Private::showNotification(
-		not_null<PeerData*> peer,
-		std::shared_ptr<Data::CloudImageView> &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options) {
+		Info &&info,
+		Ui::PeerUserpicView &userpicView) {
 	if (!_notifier) {
 		return false;
 	}
 
 	return base::WinRT::Try([&] {
-		return showNotificationInTryCatch(
-			peer,
-			userpicView,
-			msgId,
-			title,
-			subtitle,
-			msg,
-			options);
+		return showNotificationInTryCatch(std::move(info), userpicView);
 	}).value_or(false);
 }
 
@@ -659,33 +767,33 @@ std::wstring Manager::Private::ensureSendButtonIcon() {
 }
 
 bool Manager::Private::showNotificationInTryCatch(
-		not_null<PeerData*> peer,
-		std::shared_ptr<Data::CloudImageView> &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options) {
-	const auto withSubtitle = !subtitle.isEmpty();
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) {
+	const auto withSubtitle = !info.subtitle.isEmpty();
+	const auto peer = info.peer;
 	auto toastXml = XmlDocument();
 
-	const auto key = FullPeer{
+	const auto key = ContextId{
 		.sessionId = peer->session().uniqueId(),
 		.peerId = peer->id,
+		.topicRootId = info.topicRootId,
+		.monoforumPeerId = info.monoforumPeerId,
 	};
 	const auto notificationId = NotificationId{
-		.full = key,
-		.msgId = msgId
+		.contextId = key,
+		.msgId = info.itemId,
 	};
-	const auto idString = u"pid=%1&session=%2&peer=%3&msg=%4"_q
+	const auto idString = u"pid=%1&session=%2&peer=%3&topic=%4&monoforumpeer=%5&msg=%6"_q
 		.arg(GetCurrentProcessId())
 		.arg(key.sessionId)
 		.arg(key.peerId.value)
-		.arg(msgId.bare);
+		.arg(info.topicRootId.bare)
+		.arg(info.monoforumPeerId.value)
+		.arg(info.itemId.bare);
 
 	const auto modern = Platform::IsWindows10OrGreater();
 	if (modern) {
-		toastXml.LoadXml(NotificationTemplate(idString, options));
+		toastXml.LoadXml(NotificationTemplate(idString, info.options));
 	} else {
 		toastXml = ToastNotificationManager::GetTemplateContent(
 			(withSubtitle
@@ -695,7 +803,7 @@ bool Manager::Private::showNotificationInTryCatch(
 		SetAction(toastXml, idString);
 	}
 
-	const auto userpicKey = options.hideNameAndPhoto
+	const auto userpicKey = info.options.hideNameAndPhoto
 		? InMemoryKey()
 		: peer->userpicUniqueKey(userpicView);
 	const auto userpicPath = _cachedUserpics.get(
@@ -704,13 +812,13 @@ bool Manager::Private::showNotificationInTryCatch(
 		userpicView);
 	const auto userpicPathWide = QDir::toNativeSeparators(
 		userpicPath).toStdWString();
-	if (modern && !options.hideReplyButton) {
+	if (modern && !info.options.hideReplyButton) {
 		SetReplyIconSrc(toastXml, ensureSendButtonIcon());
 		SetReplyPlaceholder(
 			toastXml,
 			tr::lng_message_ph(tr::now).toStdWString());
 	}
-	if (modern && !options.hideMarkAsRead) {
+	if (modern && !info.options.hideMarkAsRead) {
 		SetMarkAsReadText(
 			toastXml,
 			tr::lng_context_mark_read(tr::now).toStdWString());
@@ -723,17 +831,20 @@ bool Manager::Private::showNotificationInTryCatch(
 		return false;
 	}
 
-	SetNodeValueString(toastXml, nodeList.Item(0), title.toStdWString());
+	SetNodeValueString(
+		toastXml,
+		nodeList.Item(0),
+		info.title.toStdWString());
 	if (withSubtitle) {
 		SetNodeValueString(
 			toastXml,
 			nodeList.Item(1),
-			subtitle.toStdWString());
+			info.subtitle.toStdWString());
 	}
 	SetNodeValueString(
 		toastXml,
 		nodeList.Item(withSubtitle ? 2 : 1),
-		msg.toStdWString());
+		info.message.toStdWString());
 
 	const auto weak = std::weak_ptr(_guarded);
 	const auto performOnMainQueue = [=](FnMut<void(Manager *manager)> task) {
@@ -804,11 +915,11 @@ bool Manager::Private::showNotificationInTryCatch(
 
 	auto i = _notifications.find(key);
 	if (i != _notifications.cend()) {
-		auto j = i->second.find(msgId);
+		auto j = i->second.find(info.itemId);
 		if (j != i->second.end()) {
 			const auto existing = j->second;
 			i->second.erase(j);
-			_notifier.Hide(existing);
+			tryHide(existing);
 			i = _notifications.find(key);
 		}
 	}
@@ -824,12 +935,19 @@ bool Manager::Private::showNotificationInTryCatch(
 		}
 		return false;
 	}
-	i->second.emplace(msgId, toast);
+	i->second.emplace(info.itemId, toast);
 	return true;
 }
 
-Manager::Manager(Window::Notifications::System *system) : NativeManager(system)
-, _private(std::make_unique<Private>(this, Private::Type::Rounded)) {
+void Manager::Private::tryHide(const ToastNotification &notification) {
+	base::WinRT::Try([&] {
+		_notifier.Hide(notification);
+	});
+}
+
+Manager::Manager(Window::Notifications::System *system)
+: NativeManager(system)
+, _private(std::make_unique<Private>(this)) {
 }
 
 bool Manager::init() {
@@ -847,21 +965,9 @@ void Manager::handleActivation(const ToastActivation &activation) {
 Manager::~Manager() = default;
 
 void Manager::doShowNativeNotification(
-		not_null<PeerData*> peer,
-		std::shared_ptr<Data::CloudImageView> &userpicView,
-		MsgId msgId,
-		const QString &title,
-		const QString &subtitle,
-		const QString &msg,
-		DisplayOptions options) {
-	_private->showNotification(
-		peer,
-		userpicView,
-		msgId,
-		title,
-		subtitle,
-		msg,
-		options);
+		NotificationInfo &&info,
+		Ui::PeerUserpicView &userpicView) {
+	_private->showNotification(std::move(info), userpicView);
 }
 
 void Manager::doClearAllFast() {
@@ -870,6 +976,14 @@ void Manager::doClearAllFast() {
 
 void Manager::doClearFromItem(not_null<HistoryItem*> item) {
 	_private->clearFromItem(item);
+}
+
+void Manager::doClearFromTopic(not_null<Data::ForumTopic*> topic) {
+	_private->clearFromTopic(topic);
+}
+
+void Manager::doClearFromSublist(not_null<Data::SavedSublist*> sublist) {
+	_private->clearFromSublist(sublist);
 }
 
 void Manager::doClearFromHistory(not_null<History*> history) {
@@ -890,22 +1004,27 @@ void Manager::onAfterNotificationActivated(
 	_private->afterNotificationActivated(id, window);
 }
 
-bool Manager::doSkipAudio() const {
-	return SkipAudioForCustom()
-		|| QuietHoursEnabled
-		|| FocusAssistBlocks;
-}
-
 bool Manager::doSkipToast() const {
 	return false;
 }
 
-bool Manager::doSkipFlashBounce() const {
-	return SkipFlashBounceForCustom()
+void Manager::doMaybePlaySound(Fn<void()> playSound) {
+	const auto skip = SkipSoundForCustom()
 		|| QuietHoursEnabled
 		|| FocusAssistBlocks;
+	if (!skip) {
+		playSound();
+	}
 }
-#endif // !__MINGW32__
+
+void Manager::doMaybeFlashBounce(Fn<void()> flashBounce) {
+	const auto skip = SkipFlashBounceForCustom()
+		|| QuietHoursEnabled
+		|| FocusAssistBlocks;
+	if (!skip) {
+		flashBounce();
+	}
+}
 
 } // namespace Notifications
 } // namespace Platform

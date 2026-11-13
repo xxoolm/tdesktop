@@ -20,13 +20,16 @@ namespace {
 
 // Send channel views each second.
 constexpr auto kSendViewsTimeout = crl::time(1000);
+constexpr auto kPollExtendedMediaPeriod = 30 * crl::time(1000);
+constexpr auto kMaxPollPerRequest = 100;
 
 } // namespace
 
 ViewsManager::ViewsManager(not_null<ApiWrap*> api)
 : _session(&api->session())
 , _api(&api->instance())
-, _incrementTimer([=] { viewsIncrement(); }) {
+, _incrementTimer([=] { viewsIncrement(); })
+, _pollTimer([=] { sendPollRequests(); }) {
 }
 
 void ViewsManager::scheduleIncrement(not_null<HistoryItem*> item) {
@@ -52,6 +55,33 @@ void ViewsManager::removeIncremented(not_null<PeerData*> peer) {
 	_incremented.remove(peer);
 }
 
+void ViewsManager::pollExtendedMedia(
+		not_null<HistoryItem*> item,
+		bool force) {
+	if (!item->isRegular()) {
+		return;
+	}
+	const auto id = item->id;
+	const auto peer = item->history()->peer;
+	auto &request = _pollRequests[peer];
+	if (request.ids.contains(id) || request.sent.contains(id)) {
+		if (!force || request.forced) {
+			return;
+		}
+	}
+	request.ids.emplace(id);
+	if (force) {
+		request.forced = true;
+	}
+	const auto delay = force ? 1 : kPollExtendedMediaPeriod;
+	if (!request.id && (!request.when || force)) {
+		request.when = crl::now() + delay;
+	}
+	if (!_pollTimer.isActive() || force) {
+		_pollTimer.callOnce(delay);
+	}
+}
+
 void ViewsManager::viewsIncrement() {
 	for (auto i = _toIncrement.begin(); i != _toIncrement.cend();) {
 		if (_incrementRequests.contains(i->first)) {
@@ -65,7 +95,7 @@ void ViewsManager::viewsIncrement() {
 			ids.push_back(MTP_int(msgId));
 		}
 		const auto requestId = _api.request(MTPmessages_GetMessagesViews(
-			i->first->input,
+			i->first->input(),
 			MTP_vector<MTPint>(ids),
 			MTP_bool(true)
 		)).done([=](
@@ -78,6 +108,91 @@ void ViewsManager::viewsIncrement() {
 
 		_incrementRequests.emplace(i->first, requestId);
 		i = _toIncrement.erase(i);
+	}
+}
+
+void ViewsManager::sendPollRequests() {
+	const auto now = crl::now();
+	auto toRequest = base::flat_map<not_null<PeerData*>, QVector<MTPint>>();
+	auto nearest = crl::time();
+	for (auto &[peer, request] : _pollRequests) {
+		if (request.id) {
+			continue;
+		} else if (request.when <= now) {
+			Assert(request.sent.empty());
+			auto &list = toRequest[peer];
+			const auto count = int(request.ids.size());
+			if (count < kMaxPollPerRequest) {
+				request.sent = base::take(request.ids);
+			} else {
+				const auto from = begin(request.ids);
+				const auto end = from + kMaxPollPerRequest;
+				request.sent = { from, end };
+				request.ids.erase(from, end);
+			}
+			list.reserve(request.sent.size());
+			for (const auto &id : request.sent) {
+				list.push_back(MTP_int(id.bare));
+			}
+			if (!request.ids.empty()) {
+				nearest = now;
+			}
+		} else if (!nearest || nearest > request.when) {
+			nearest = request.when;
+		}
+	}
+	sendPollRequests(toRequest);
+	if (nearest) {
+		_pollTimer.callOnce(std::max(nearest - now, crl::time(1)));
+	}
+}
+
+void ViewsManager::sendPollRequests(
+	const base::flat_map<
+		not_null<PeerData*>,
+		QVector<MTPint>> &batched) {
+	for (auto &[peer, list] : batched) {
+		const auto finish = [=, list = list](mtpRequestId id) {
+			const auto now = crl::now();
+			const auto owner = &_session->data();
+			for (auto i = begin(_pollRequests); i != end(_pollRequests);) {
+				if (i->second.id == id) {
+					const auto peer = i->first->id;
+					for (const auto &itemId : i->second.sent) {
+						if (const auto item = owner->message(peer, itemId)) {
+							owner->requestItemRepaint(item);
+						}
+					}
+					i->second.sent.clear();
+					i->second.id = 0;
+					if (i->second.ids.empty()) {
+						i = _pollRequests.erase(i);
+					} else {
+						const auto delay = i->second.forced
+							? 1
+							: kPollExtendedMediaPeriod;
+						i->second.when = now + delay;
+						if (!_pollTimer.isActive() || i->second.forced) {
+							_pollTimer.callOnce(delay);
+						}
+						++i;
+					}
+				} else {
+					++i;
+				}
+			}
+		};
+		const auto requestId = _api.request(MTPmessages_GetExtendedMedia(
+			peer->input(),
+			MTP_vector<MTPint>(list)
+		)).done([=](const MTPUpdates &result, mtpRequestId id) {
+			_session->api().applyUpdates(result);
+			finish(id);
+		}).fail([=](const MTP::Error &error, mtpRequestId id) {
+			finish(id);
+		}).send();
+
+		_pollRequests[peer].id = requestId;
 	}
 }
 
@@ -95,12 +210,13 @@ void ViewsManager::done(
 			if (id != requestId) {
 				continue;
 			}
-			const auto channel = peerToChannel(peer->id);
 			for (auto j = 0, l = int(ids.size()); j < l; ++j) {
-				if (const auto item = owner.message(channel, ids[j].v)) {
+				if (const auto item = owner.message(peer->id, ids[j].v)) {
 					v[j].match([&](const MTPDmessageViews &data) {
 						if (const auto views = data.vviews()) {
-							item->setViewsCount(views->v);
+							if (item->changeViewsCount(views->v)) {
+								_session->data().notifyItemDataChange(item);
+							}
 						}
 						if (const auto forwards = data.vforwards()) {
 							item->setForwardsCount(forwards->v);

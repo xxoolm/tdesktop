@@ -9,7 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "lang/lang_keys.h"
 #include "ui/widgets/buttons.h"
-#include "ui/widgets/input_fields.h"
+#include "ui/widgets/fields/input_field.h"
 #include "styles/style_layers.h"
 #include "styles/style_calls.h"
 
@@ -44,7 +44,7 @@ void RateCallBox::prepare() {
 void RateCallBox::resizeEvent(QResizeEvent *e) {
 	BoxContent::resizeEvent(e);
 
-	const auto starsWidth = (_stars.size() * st::callRatingStar.width);
+	const auto starsWidth = int(_stars.size()) * st::callRatingStar.width;
 	auto starLeft = (width() - starsWidth) / 2;
 	const auto starTop = st::callRatingStarTop;
 	for (auto &star : _stars) {
@@ -92,11 +92,16 @@ void RateCallBox::ratingChanged(int value) {
 				_comment->height());
 
 			updateMaxHeight();
-			connect(_comment, &InputField::resized, [=] {
+			_comment->heightChanges(
+			) | rpl::on_next([=] {
 				commentResized();
-			});
-			connect(_comment, &InputField::submitted, [=] { send(); });
-			connect(_comment, &InputField::cancelled, [=] { closeBox(); });
+			}, _comment->lifetime());
+			_comment->submits(
+			) | rpl::on_next([=] { send(); }, _comment->lifetime());
+			_comment->cancelled(
+			) | rpl::on_next([=] {
+				closeBox();
+			}, _comment->lifetime());
 		}
 		_comment->setFocusFast();
 	} else if (_comment) {
@@ -109,7 +114,7 @@ void RateCallBox::setInnerFocus() {
 	if (_comment) {
 		_comment->setFocusFast();
 	} else {
-		setFocus();
+		BoxContent::setInnerFocus();
 	}
 }
 

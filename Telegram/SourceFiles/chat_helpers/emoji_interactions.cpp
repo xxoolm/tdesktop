@@ -53,13 +53,15 @@ EmojiInteractions::EmojiInteractions(not_null<Main::Session*> session)
 	_session->changes().messageUpdates(
 		Data::MessageUpdate::Flag::Destroyed
 		| Data::MessageUpdate::Flag::Edited
-	) | rpl::start_with_next([=](const Data::MessageUpdate &update) {
+	) | rpl::on_next([=](const Data::MessageUpdate &update) {
 		if (update.flags & Data::MessageUpdate::Flag::Destroyed) {
 			_outgoing.remove(update.item);
 			_incoming.remove(update.item);
+			_autoplay.remove(update.item);
 		} else if (update.flags & Data::MessageUpdate::Flag::Edited) {
 			checkEdition(update.item, _outgoing);
 			checkEdition(update.item, _incoming);
+			checkEdition(update.item, _autoplay);
 		}
 	}, _lifetime);
 }
@@ -69,60 +71,26 @@ EmojiInteractions::~EmojiInteractions() = default;
 void EmojiInteractions::checkEdition(
 		not_null<HistoryItem*> item,
 		base::flat_map<not_null<HistoryItem*>, std::vector<Animation>> &map) {
+	const auto &pack = _session->emojiStickersPack();
 	const auto i = map.find(item);
 	if (i != end(map)
-		&& (i->second.front().emoji != chooseInteractionEmoji(item))) {
+		&& (i->second.front().emoji != pack.chooseInteractionEmoji(item))) {
 		map.erase(i);
 	}
-}
-
-EmojiPtr EmojiInteractions::chooseInteractionEmoji(
-		not_null<HistoryItem*> item) const {
-	return chooseInteractionEmoji(item->originalText().text);
-}
-
-EmojiPtr EmojiInteractions::chooseInteractionEmoji(
-		const QString &emoticon) const {
-	const auto emoji = Ui::Emoji::Find(emoticon);
-	if (!emoji) {
-		return nullptr;
-	}
-	const auto &pack = _session->emojiStickersPack();
-	if (!pack.animationsForEmoji(emoji).empty()) {
-		return emoji;
-	}
-	if (const auto original = emoji->original(); original != emoji) {
-		if (!pack.animationsForEmoji(original).empty()) {
-			return original;
-		}
-	}
-	static const auto kHearts = {
-		QString::fromUtf8("\xf0\x9f\x92\x9b"),
-		QString::fromUtf8("\xf0\x9f\x92\x99"),
-		QString::fromUtf8("\xf0\x9f\x92\x9a"),
-		QString::fromUtf8("\xf0\x9f\x92\x9c"),
-		QString::fromUtf8("\xf0\x9f\xa7\xa1"),
-		QString::fromUtf8("\xf0\x9f\x96\xa4"),
-		QString::fromUtf8("\xf0\x9f\xa4\x8e"),
-		QString::fromUtf8("\xf0\x9f\xa4\x8d"),
-	};
-	return ranges::contains(kHearts, emoji->id())
-		? Ui::Emoji::Find(QString::fromUtf8("\xe2\x9d\xa4"))
-		: emoji;
 }
 
 void EmojiInteractions::startOutgoing(
 		not_null<const HistoryView::Element*> view) {
 	const auto item = view->data();
-	if (!IsServerMsgId(item->id) || !item->history()->peer->isUser()) {
-		return;
-	}
-	const auto emoticon = item->originalText().text;
-	const auto emoji = chooseInteractionEmoji(emoticon);
-	if (!emoji) {
+	if (!item->isRegular() || !item->history()->peer->isUser()) {
 		return;
 	}
 	const auto &pack = _session->emojiStickersPack();
+	const auto emoticon = item->originalText().text;
+	const auto emoji = pack.chooseInteractionEmoji(emoticon);
+	if (!emoji) {
+		return;
+	}
 	const auto &list = pack.animationsForEmoji(emoji);
 	if (list.empty()) {
 		return;
@@ -156,25 +124,60 @@ void EmojiInteractions::startOutgoing(
 	check(now);
 }
 
+void EmojiInteractions::startAutoplay(
+		not_null<const HistoryView::Element*> view) {
+	const auto item = view->data();
+	if (!item->isRegular() || !item->history()->peer->isUser()) {
+		return;
+	}
+	const auto &pack = _session->emojiStickersPack();
+	const auto emoticon = item->originalText().text;
+	const auto emoji = pack.chooseInteractionEmoji(emoticon);
+	if (!emoji) {
+		return;
+	}
+	const auto &list = pack.animationsForEmoji(emoji);
+	if (list.empty() || !item->markEmojiInteractionWatched()) {
+		return;
+	}
+	auto &animations = _autoplay[item];
+	if (!animations.empty()) {
+		return;
+	}
+	const auto index = base::RandomIndex(int(list.size()));
+	const auto document = (begin(list) + index)->second;
+	const auto media = document->createMediaView();
+	media->checkStickerLarge();
+	const auto now = crl::now();
+	animations.push_back({
+		.emoticon = emoticon,
+		.emoji = emoji,
+		.document = document,
+		.media = media,
+		.scheduledAt = now,
+		.incoming = false,
+		.index = index,
+	});
+	check(now);
+}
+
 void EmojiInteractions::startIncoming(
 		not_null<PeerData*> peer,
 		MsgId messageId,
 		const QString &emoticon,
 		EmojiInteractionsBunch &&bunch) {
-	if (!peer->isUser()
-		|| bunch.interactions.empty()
-		|| !IsServerMsgId(messageId)) {
+	if (!peer->isUser() || bunch.interactions.empty()) {
 		return;
 	}
-	const auto item = _session->data().message(nullptr, messageId);
-	if (!item) {
-		return;
-	}
-	const auto emoji = chooseInteractionEmoji(item);
-	if (!emoji || emoji != chooseInteractionEmoji(emoticon)) {
+	const auto item = _session->data().message(peer->id, messageId);
+	if (!item || !item->isRegular()) {
 		return;
 	}
 	const auto &pack = _session->emojiStickersPack();
+	const auto emoji = pack.chooseInteractionEmoji(item);
+	if (!emoji || emoji != pack.chooseInteractionEmoji(emoticon)) {
+		return;
+	}
 	const auto &list = pack.animationsForEmoji(emoji);
 	if (list.empty()) {
 		return;
@@ -192,7 +195,7 @@ void EmojiInteractions::startIncoming(
 		}
 		const auto listSize = int(list.size());
 		const auto index = (single.index - 1);
-		if (index < listSize) {
+		if (index >= 0 && index < listSize) {
 			const auto document = (begin(list) + index)->second;
 			const auto media = document->createMediaView();
 			media->checkStickerLarge();
@@ -217,8 +220,9 @@ void EmojiInteractions::startIncoming(
 void EmojiInteractions::seenOutgoing(
 		not_null<PeerData*> peer,
 		const QString &emoticon) {
+	const auto &pack = _session->emojiStickersPack();
 	if (const auto i = _playsSent.find(peer); i != end(_playsSent)) {
-		if (const auto emoji = chooseInteractionEmoji(emoticon)) {
+		if (const auto emoji = pack.chooseInteractionEmoji(emoticon)) {
 			if (const auto j = i->second.find(emoji); j != end(i->second)) {
 				const auto last = j->second.lastDoneReceivedAt;
 				if (!last || last + kAcceptSeenSinceRequest > crl::now()) {
@@ -231,8 +235,10 @@ void EmojiInteractions::seenOutgoing(
 
 auto EmojiInteractions::checkAnimations(crl::time now) -> CheckResult {
 	return Combine(
-		checkAnimations(now, _outgoing),
-		checkAnimations(now, _incoming));
+		Combine(
+			checkAnimations(now, _outgoing),
+			checkAnimations(now, _incoming)),
+		checkAnimations(now, _autoplay));
 }
 
 auto EmojiInteractions::checkAnimations(
@@ -316,7 +322,7 @@ void EmojiInteractions::sendAccumulatedOutgoing(
 	const auto emoji = from->emoji;
 	const auto requestId = _session->api().request(MTPmessages_SetTyping(
 		MTP_flags(0),
-		peer->input,
+		peer->input(),
 		MTPint(), // top_msg_id
 		MTP_sendMessageEmojiInteraction(
 			MTP_string(from->emoticon),
@@ -367,6 +373,18 @@ auto EmojiInteractions::checkAccumulated(crl::time now) -> CheckResult {
 		clearAccumulatedIncoming(now, animations);
 		if (animations.empty()) {
 			i = _incoming.erase(i);
+			continue;
+		} else {
+			// Doesn't really matter when, just clear them finally.
+			nearest = std::min(nearest, now + kAccumulateDelay);
+		}
+		++i;
+	}
+	for (auto i = begin(_autoplay); i != end(_autoplay);) {
+		auto &animations = i->second;
+		clearAccumulatedIncoming(now, animations);
+		if (animations.empty()) {
+			i = _autoplay.erase(i);
 			continue;
 		} else {
 			// Doesn't really matter when, just clear them finally.
@@ -443,7 +461,7 @@ void EmojiInteractions::setWaitingForDownload(bool waiting) {
 	_waitingForDownload = waiting;
 	if (_waitingForDownload) {
 		_session->downloaderTaskFinished(
-		) | rpl::start_with_next([=] {
+		) | rpl::on_next([=] {
 			check();
 		}, _downloadCheckLifetime);
 	} else {
@@ -461,7 +479,7 @@ void EmojiInteractions::playStarted(not_null<PeerData*> peer, QString emoji) {
 	}
 	_session->api().request(MTPmessages_SetTyping(
 		MTP_flags(0),
-		peer->input,
+		peer->input(),
 		MTPint(), // top_msg_id
 		MTP_sendMessageEmojiInteractionSeen(MTP_string(emoji))
 	)).send();
@@ -493,7 +511,7 @@ EmojiInteractionsBunch EmojiInteractions::Parse(const QByteArray &json) {
 	for (const auto interaction : actions) {
 		const auto object = interaction.toObject();
 		const auto index = object.value("i").toInt();
-		if (index < 0 || index > 10) {
+		if (index < 1 || index > 10) {
 			LOG(("API Error: Bad interaction index: %1").arg(index));
 			return {};
 		}

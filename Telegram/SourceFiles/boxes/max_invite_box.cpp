@@ -17,8 +17,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/layers/generic_box.h"
 #include "ui/text/text_utilities.h"
 #include "ui/toast/toast.h"
+#include "ui/painter.h"
+#include "styles/style_add_contact_box.h"
 #include "styles/style_layers.h"
-#include "styles/style_boxes.h"
+#include "styles/style_chat_helpers.h"
 
 #include <QtGui/QGuiApplication>
 #include <QtGui/QClipboard>
@@ -28,8 +30,7 @@ namespace {
 TextParseOptions kInformBoxTextOptions = {
 	(TextParseLinks
 		| TextParseMultiline
-		| TextParseMarkdown
-		| TextParseRichText), // flags
+		| TextParseMarkdown), // flags
 	0, // maxw
 	0, // maxh
 	Qt::LayoutDirectionAuto, // dir
@@ -77,7 +78,7 @@ void MaxInviteBox::prepare() {
 	_channel->session().changes().peerUpdates(
 		_channel,
 		Data::PeerUpdate::Flag::InviteLinks
-	) | rpl::start_with_next([=] {
+	) | rpl::on_next([=] {
 		rtlupdate(_invitationLink);
 	}, lifetime());
 }
@@ -91,10 +92,14 @@ void MaxInviteBox::mousePressEvent(QMouseEvent *e) {
 	if (_linkOver) {
 		if (!_channel->inviteLink().isEmpty()) {
 			QGuiApplication::clipboard()->setText(_channel->inviteLink());
-			Ui::Toast::Show(tr::lng_create_channel_link_copied(tr::now));
+			showToast({
+				.text = { tr::lng_create_channel_link_copied(tr::now) },
+				.iconLottie = u"toast/voip_invite"_q,
+				.iconLottieSize = st::toastLottieIconSize,
+			});
 		} else if (_channel->isFullLoaded() && !_creatingInviteLink) {
 			_creatingInviteLink = true;
-			_channel->session().api().inviteLinks().create(_channel);
+			_channel->session().api().inviteLinks().create({ _channel });
 		}
 	}
 }
@@ -133,8 +138,8 @@ void MaxInviteBox::paintEvent(QPaintEvent *e) {
 	auto option = QTextOption(style::al_left);
 	option.setWrapMode(QTextOption::WrapAnywhere);
 	p.setFont(_linkOver
-		? st::defaultInputField.font->underline()
-		: st::defaultInputField.font);
+		? st::defaultInputField.style.font->underline()
+		: st::defaultInputField.style.font);
 	p.setPen(st::defaultLinkButton.color);
 	const auto inviteLinkText = _channel->inviteLink().isEmpty()
 		? tr::lng_group_invite_create(tr::now)

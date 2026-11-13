@@ -13,8 +13,19 @@ class Image;
 class HistoryItem;
 enum class ImageRoundRadius;
 
+namespace style {
+struct DialogRow;
+struct DialogsMiniIcon;
+} // namespace style
+
 namespace Ui {
+class SpoilerAnimation;
 } // namespace Ui
+
+namespace Data {
+class Forum;
+class SavedMessages;
+} // namespace Data
 
 namespace HistoryView {
 struct ToPreviewOptions;
@@ -25,6 +36,12 @@ struct ItemPreview;
 namespace Dialogs::Ui {
 
 using namespace ::Ui;
+
+struct PaintContext;
+struct TopicJumpCache;
+class TopicsView;
+
+[[nodiscard]] TextWithEntities DialogsPreviewText(TextWithEntities text);
 
 class MessageView final {
 public:
@@ -38,27 +55,64 @@ public:
 	void itemInvalidated(not_null<const HistoryItem*> item);
 	[[nodiscard]] bool dependsOn(not_null<const HistoryItem*> item) const;
 
+	[[nodiscard]] bool prepared(
+		not_null<const HistoryItem*> item,
+		Data::Forum *forum,
+		Data::SavedMessages *monoforum) const;
+	void prepare(
+		not_null<const HistoryItem*> item,
+		Data::Forum *forum,
+		Data::SavedMessages *monoforum,
+		Fn<void()> customEmojiRepaint,
+		ToPreviewOptions options);
+
 	void paint(
 		Painter &p,
-		not_null<const HistoryItem*> item,
 		const QRect &geometry,
-		bool active,
-		bool selected,
-		ToPreviewOptions options) const;
+		const PaintContext &context) const;
+
+	[[nodiscard]] bool hasAnimatedContent() const;
+	[[nodiscard]] QRect lastPaintGeometry() const {
+		return _lastPaintGeometry;
+	}
+	void resetLastPaintGeometry();
+
+	[[nodiscard]] bool isInTopicJump(int x, int y) const;
+	void addTopicJumpRipple(
+		QPoint origin,
+		not_null<TopicJumpCache*> topicJumpCache,
+		Fn<void()> updateCallback);
+	void stopLastRipple();
+	void clearRipple();
 
 private:
 	struct LoadingContext;
 
+	[[nodiscard]] int countWidth() const;
+	void paintJumpToLast(
+		Painter &p,
+		const QRect &rect,
+		const PaintContext &context,
+		int width1) const;
+
 	mutable const HistoryItem *_textCachedFor = nullptr;
-	mutable Ui::Text::String _senderCache;
-	mutable Ui::Text::String _textCache;
+	mutable Text::String _senderCache;
+	mutable std::unique_ptr<TopicsView> _topics;
+	mutable Text::String _textCache;
 	mutable std::vector<ItemPreviewImage> _imagesCache;
+	mutable std::unique_ptr<SpoilerAnimation> _spoiler;
 	mutable std::unique_ptr<LoadingContext> _loadingContext;
+	mutable const style::DialogsMiniIcon *_leftIcon = nullptr;
+	mutable QImage _cornersCache;
+	mutable QRect _lastPaintGeometry;
+	mutable bool _hasPlainLinkAtBegin = false;
+	mutable bool _unreadMedia = false;
 
 };
 
 [[nodiscard]] HistoryView::ItemPreview PreviewWithSender(
 	HistoryView::ItemPreview &&preview,
-	const QString &sender);
+	const QString &sender,
+	TextWithEntities topic);
 
 } // namespace Dialogs::Ui

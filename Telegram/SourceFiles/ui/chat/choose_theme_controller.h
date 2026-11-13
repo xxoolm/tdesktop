@@ -66,12 +66,14 @@ private:
 
 	const not_null<RpWidget*> _content;
 	const not_null<RpWidget*> _inner;
+	const EmojiPtr _disabledEmoji = nullptr;
 	std::vector<Entry> _entries;
 	QString _pressed;
-	QString _chosen;
+	rpl::variable<QString> _chosen;
 	std::optional<QPoint> _pressPosition;
 	std::optional<QPoint> _dragStartPosition;
 	int _dragStartInnerLeft = 0;
+	int _giftsFinishAt = 0;
 	bool _initialInnerLeftApplied = false;
 
 	rpl::variable<bool> _shouldBeShown = false;

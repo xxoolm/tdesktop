@@ -7,13 +7,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/boxes/edit_invite_link.h"
 
+#include "base/unixtime.h"
 #include "lang/lang_keys.h"
 #include "ui/boxes/choose_date_time.h"
-#include "ui/widgets/labels.h"
-#include "ui/widgets/input_fields.h"
+#include "ui/layers/generic_box.h"
+#include "ui/vertical_list.h"
+#include "ui/text/format_values.h"
+#include "ui/text/text_utilities.h"
 #include "ui/widgets/checkbox.h"
+#include "ui/widgets/fields/input_field.h"
+#include "ui/widgets/fields/number_input.h"
+#include "ui/effects/credits_graphics.h"
+#include "ui/widgets/labels.h"
 #include "ui/wrap/slide_wrap.h"
-#include "base/unixtime.h"
 #include "styles/style_settings.h"
 #include "styles/style_layers.h"
 #include "styles/style_info.h"
@@ -30,27 +36,52 @@ constexpr auto kMaxLabelLength = 32;
 	if (date > 0) {
 		return langDateTime(base::unixtime::parse(date));
 	} else if (-date < kDay) {
-		return tr::lng_group_call_duration_hours(
-			tr::now,
-			lt_count,
-			(-date / kHour));
+		return tr::lng_hours(tr::now, lt_count, (-date / kHour));
 	} else if (-date < 7 * kDay) {
-		return tr::lng_group_call_duration_days(
-			tr::now,
-			lt_count,
-			(-date / kDay));
+		return tr::lng_days(tr::now, lt_count, (-date / kDay));
 	} else {
-		return tr::lng_local_storage_limit_weeks(
-			tr::now,
-			lt_count,
-			(-date / (7 * kDay)));
+		return tr::lng_weeks(tr::now, lt_count, (-date / (7 * kDay)));
 	}
+}
+
+[[nodiscard]] TextWithEntities RequestApprovalAbout(
+		bool enabled,
+		bool locked,
+		bool isGroup,
+		const QString &guardBotUsername,
+		const QString &guardBotLink) {
+	if (locked) {
+		return TextWithEntities{
+			(isGroup
+				? tr::lng_group_invite_about_approve_disabled
+				: tr::lng_group_invite_about_approve_disabled_channel)(
+					tr::now)
+		};
+	} else if (enabled && !guardBotUsername.isEmpty()) {
+		return (isGroup
+			? tr::lng_group_invite_about_approve_managed
+			: tr::lng_group_invite_about_approve_managed_channel)(
+				tr::now,
+				lt_bot,
+				tr::link('@' + guardBotUsername, guardBotLink),
+				tr::marked);
+	}
+	return TextWithEntities{
+		enabled
+			? (isGroup
+				? tr::lng_group_invite_about_approve
+				: tr::lng_group_invite_about_approve_channel)(tr::now)
+			: (isGroup
+				? tr::lng_group_invite_about_no_approve
+				: tr::lng_group_invite_about_no_approve_channel)(tr::now)
+	};
 }
 
 } // namespace
 
 void EditInviteLinkBox(
 		not_null<GenericBox*> box,
+		Fn<InviteLinkSubscriptionToggle()> fillSubscription,
 		const InviteLinkFields &data,
 		Fn<void(InviteLinkFields)> done) {
 	using namespace rpl::mappers;
@@ -58,6 +89,11 @@ void EditInviteLinkBox(
 	const auto link = data.link;
 	const auto isGroup = data.isGroup;
 	const auto isPublic = data.isPublic;
+	const auto globalRequestApproval = data.globalRequestApproval;
+	const auto guardBotUsername = data.guardBotUsername;
+	const auto guardBotLink = data.guardBotLink;
+	const auto subscriptionLocked = data.subscriptionCredits > 0;
+	const auto requestApprovalLocked = isPublic && !globalRequestApproval;
 	box->setTitle(link.isEmpty()
 		? tr::lng_group_invite_new_title()
 		: tr::lng_group_invite_edit_title());
@@ -70,9 +106,9 @@ void EditInviteLinkBox(
 			object_ptr<FlatLabel>(
 				container,
 				std::move(text),
-				st::settingsSubsectionTitle),
-			(st::settingsSubsectionTitlePadding
-				+ style::margins(0, st::settingsSectionSkip, 0, 0)));
+				st::defaultSubsectionTitle),
+			(st::defaultSubsectionTitlePadding
+				+ style::margins(0, st::defaultVerticalListSkip, 0, 0)));
 	};
 	const auto addDivider = [&](
 			not_null<VerticalLayout*> container,
@@ -85,7 +121,21 @@ void EditInviteLinkBox(
 					container,
 					std::move(text),
 					st::boxDividerLabel),
-				st::settingsDividerLabelPadding),
+				st::defaultBoxDividerLabelPadding),
+			margins);
+	};
+	const auto addRichDivider = [&](
+			not_null<VerticalLayout*> container,
+			rpl::producer<TextWithEntities> text,
+			style::margins margins = style::margins()) {
+		container->add(
+			object_ptr<DividerLabel>(
+				container,
+				object_ptr<FlatLabel>(
+					container,
+					std::move(text),
+					st::boxDividerLabel),
+				st::defaultBoxDividerLabelPadding),
 			margins);
 	};
 
@@ -94,6 +144,10 @@ void EditInviteLinkBox(
 	const auto expireGroup = std::make_shared<RadiobuttonGroup>(expire);
 	const auto usage = data.usageLimit ? data.usageLimit : kMaxLimit;
 	const auto usageGroup = std::make_shared<RadiobuttonGroup>(usage);
+	box->lifetime().add([=] {
+		expireGroup->setChangedCallback(nullptr);
+		usageGroup->setChangedCallback(nullptr);
+	});
 
 	using Buttons = base::flat_map<int, base::unique_qptr<Radiobutton>>;
 	struct State {
@@ -102,52 +156,97 @@ void EditInviteLinkBox(
 		int expireValue = 0;
 		int usageValue = 0;
 		rpl::variable<bool> requestApproval = false;
+		rpl::variable<bool> subscription = false;
 	};
 	const auto state = box->lifetime().make_state<State>(State{
 		.expireValue = expire,
 		.usageValue = usage,
-		.requestApproval = (data.requestApproval && !isPublic),
+		.requestApproval = data.requestApproval,
+		.subscription = false,
 	});
 
-	const auto requestApproval = isPublic
-		? nullptr
-		: container->add(
-			object_ptr<SettingsButton>(
-				container,
-				tr::lng_group_invite_request_approve(),
-				st::settingsButton),
-			style::margins{ 0, 0, 0, st::settingsSectionSkip });
-	if (requestApproval) {
-		requestApproval->toggleOn(state->requestApproval.value());
-		state->requestApproval = requestApproval->toggledValue();
-		addDivider(container, rpl::conditional(
-			state->requestApproval.value(),
-			(isGroup
-				? tr::lng_group_invite_about_approve()
-				: tr::lng_group_invite_about_approve_channel()),
-			(isGroup
-				? tr::lng_group_invite_about_no_approve()
-				: tr::lng_group_invite_about_no_approve_channel())));
+	auto credits = (Ui::NumberInput*)(nullptr);
+	if (!isPublic && fillSubscription) {
+		Ui::AddSkip(container);
+		const auto &[subscription, input] = fillSubscription();
+		credits = input.get();
+		subscription->toggleOn(state->subscription.value(), true);
+		if (subscriptionLocked) {
+			input->setText(QString::number(data.subscriptionCredits));
+			input->setReadOnly(true);
+			state->subscription.force_assign(true);
+			state->requestApproval.force_assign(false);
+			subscription->setToggleLocked(true);
+			subscription->finishAnimating();
+		}
+		subscription->setClickedCallback([=, show = box->uiShow()] {
+			if (subscriptionLocked) {
+				show->showToast(
+					tr::lng_group_invite_subscription_toast(tr::now));
+				return;
+			}
+			state->subscription.force_assign(!subscription->toggled());
+			state->requestApproval.force_assign(false);
+		});
 	}
 
-	const auto labelField = container->add(
-		object_ptr<Ui::InputField>(
-			container,
-			st::defaultInputField,
-			tr::lng_group_invite_label_header(),
-			data.label),
-		style::margins(
-			st::settingsSubsectionTitlePadding.left(),
-			st::settingsSectionSkip,
-			st::settingsSubsectionTitlePadding.right(),
-			st::settingsSectionSkip * 2));
-	labelField->setMaxLength(kMaxLabelLength);
-	addDivider(container, tr::lng_group_invite_label_about());
+	const auto addLabelField = [=] {
+		const auto result = container->add(
+			object_ptr<Ui::InputField>(
+				container,
+				st::defaultInputField,
+				tr::lng_group_invite_label_header(),
+				data.label),
+			style::margins(
+				st::defaultSubsectionTitlePadding.left(),
+				st::defaultVerticalListSkip,
+				st::defaultSubsectionTitlePadding.right(),
+				st::defaultVerticalListSkip * 2));
+		result->setMaxLength(kMaxLabelLength);
+		addDivider(container, tr::lng_group_invite_label_about());
+		return result;
+	};
+	const auto addSaveButtons = [=](not_null<Ui::InputField*> labelField) {
+		const auto &saveLabel = link.isEmpty()
+			? tr::lng_formatting_link_create
+			: tr::lng_settings_save;
+		box->addButton(saveLabel(), [=] {
+			const auto label = labelField->getLastText();
+			const auto expireDate = (state->expireValue == kMaxLimit)
+				? 0
+				: (state->expireValue < 0)
+				? (base::unixtime::now() - state->expireValue)
+				: state->expireValue;
+			const auto usageLimit = (state->usageValue == kMaxLimit)
+				? 0
+				: state->usageValue;
+			done(InviteLinkFields{
+				.link = link,
+				.label = label,
+				.expireDate = expireDate,
+				.usageLimit = usageLimit,
+				.subscriptionCredits = credits
+					? credits->getLastText().toInt()
+					: 0,
+				.requestApproval = state->requestApproval.current(),
+				.isGroup = isGroup,
+				.isPublic = isPublic,
+				.globalRequestApproval = globalRequestApproval,
+				.guardBotUsername = guardBotUsername,
+				.guardBotLink = guardBotLink,
+			});
+		});
+		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+	};
 
+	if (subscriptionLocked) {
+		addSaveButtons(addLabelField());
+		return;
+	}
 	addTitle(container, tr::lng_group_invite_expire_title());
 	const auto expiresWrap = container->add(
 		object_ptr<VerticalLayout>(container),
-		style::margins(0, 0, 0, st::settingsSectionSkip));
+		style::margins(0, 0, 0, st::defaultVerticalListSkip));
 	addDivider(
 		container,
 		tr::lng_group_invite_expire_about());
@@ -160,7 +259,7 @@ void EditInviteLinkBox(
 	addTitle(usagesInner, tr::lng_group_invite_usage_title());
 	const auto usagesWrap = usagesInner->add(
 		object_ptr<VerticalLayout>(usagesInner),
-		style::margins(0, 0, 0, st::settingsSectionSkip));
+		style::margins(0, 0, 0, st::defaultVerticalListSkip));
 	addDivider(usagesInner, tr::lng_group_invite_usage_about());
 
 	static const auto addButton = [](
@@ -221,14 +320,14 @@ void EditInviteLinkBox(
 				? tr::lng_group_invite_usage_any(tr::now)
 				: !limit
 				? tr::lng_group_invite_usage_custom(tr::now)
-				: QString("%L1").arg(limit);
+				: Lang::FormatCountDecimal(limit);
 			state->usageButtons.emplace(
 				limit,
 				addButton(usagesWrap, usageGroup, limit, text));
 		}
 	};
 
-	const auto guard = MakeWeak(box);
+	const auto guard = base::make_weak(box);
 	expireGroup->setChangedCallback([=](int value) {
 		if (value) {
 			state->expireValue = value;
@@ -285,7 +384,7 @@ void EditInviteLinkBox(
 					: QString::number(state->usageValue)),
 				200'000);
 			wrap->widthValue(
-			) | rpl::start_with_next([=](int width) {
+			) | rpl::on_next([=](int width) {
 				input->resize(width, input->height());
 				input->moveToLeft(0, st::boxPadding.bottom());
 			}, input->lifetime());
@@ -316,40 +415,59 @@ void EditInviteLinkBox(
 	usagesSlide->toggleOn(state->requestApproval.value() | rpl::map(!_1));
 	usagesSlide->finishAnimating();
 
-	const auto &saveLabel = link.isEmpty()
-		? tr::lng_formatting_link_create
-		: tr::lng_settings_save;
-	box->addButton(saveLabel(), [=] {
-		const auto label = labelField->getLastText();
-		const auto expireDate = (state->expireValue == kMaxLimit)
-			? 0
-			: (state->expireValue < 0)
-			? (base::unixtime::now() - state->expireValue)
-			: state->expireValue;
-		const auto usageLimit = (state->usageValue == kMaxLimit)
-			? 0
-			: state->usageValue;
-		done(InviteLinkFields{
-			.link = link,
-			.label = label,
-			.expireDate = expireDate,
-			.usageLimit = usageLimit,
-			.requestApproval = state->requestApproval.current(),
-			.isGroup = isGroup,
-			.isPublic = isPublic,
-		});
+	const auto skip = st::defaultVerticalListSkip;
+	const auto requestApproval = container->add(
+		object_ptr<SettingsButton>(
+			container,
+			(isGroup
+				? tr::lng_group_invite_request_approve
+				: tr::lng_group_invite_request_approve_channel)(),
+			st::settingsButtonNoIcon),
+		style::margins{ 0, skip, 0, skip });
+	requestApproval->toggleOn(state->requestApproval.value(), true);
+	requestApproval->setToggleLocked(requestApprovalLocked);
+	requestApproval->finishAnimating();
+	requestApproval->setClickedCallback([=] {
+		if (requestApprovalLocked) {
+			return;
+		}
+		state->requestApproval.force_assign(!requestApproval->toggled());
+		state->subscription.force_assign(false);
 	});
-	box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+	addRichDivider(
+		container,
+		state->requestApproval.value(
+		) | rpl::map([=](bool enabled) {
+			return RequestApprovalAbout(
+				enabled,
+				requestApprovalLocked,
+				isGroup,
+				guardBotUsername,
+				guardBotLink);
+		}));
+
+	addSaveButtons(addLabelField());
 }
 
 void CreateInviteLinkBox(
 		not_null<GenericBox*> box,
+		Fn<InviteLinkSubscriptionToggle()> fillSubscription,
 		bool isGroup,
 		bool isPublic,
+		bool globalRequestApproval,
+		const QString &guardBotUsername,
+		const QString &guardBotLink,
 		Fn<void(InviteLinkFields)> done) {
 	EditInviteLinkBox(
 		box,
-		InviteLinkFields{ .isGroup = isGroup, .isPublic = isPublic },
+		std::move(fillSubscription),
+		InviteLinkFields{
+			.isGroup = isGroup,
+			.isPublic = isPublic,
+			.globalRequestApproval = globalRequestApproval,
+			.guardBotUsername = guardBotUsername,
+			.guardBotLink = guardBotLink,
+		},
 		std::move(done));
 }
 

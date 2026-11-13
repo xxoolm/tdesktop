@@ -56,6 +56,7 @@ public:
 	using PlayRequest = EmojiInteractionPlayRequest;
 
 	void startOutgoing(not_null<const HistoryView::Element*> view);
+	void startAutoplay(not_null<const HistoryView::Element*> view);
 	void startIncoming(
 		not_null<PeerData*> peer,
 		MsgId messageId,
@@ -97,11 +98,6 @@ private:
 	};
 	[[nodiscard]] static CheckResult Combine(CheckResult a, CheckResult b);
 
-	[[nodiscard]] EmojiPtr chooseInteractionEmoji(
-		not_null<HistoryItem*> item) const;
-	[[nodiscard]] EmojiPtr chooseInteractionEmoji(
-		const QString &emoticon) const;
-
 	void check(crl::time now = 0);
 	[[nodiscard]] CheckResult checkAnimations(crl::time now);
 	[[nodiscard]] CheckResult checkAnimations(
@@ -127,6 +123,7 @@ private:
 
 	base::flat_map<not_null<HistoryItem*>, std::vector<Animation>> _outgoing;
 	base::flat_map<not_null<HistoryItem*>, std::vector<Animation>> _incoming;
+	base::flat_map<not_null<HistoryItem*>, std::vector<Animation>> _autoplay;
 	base::Timer _checkTimer;
 	rpl::event_stream<PlayRequest> _playRequests;
 	base::flat_map<

@@ -28,13 +28,9 @@ class Viewport::RendererGL final : public Ui::GL::Renderer {
 public:
 	explicit RendererGL(not_null<Viewport*> owner);
 
-	void init(
-		not_null<QOpenGLWidget*> widget,
-		QOpenGLFunctions &f) override;
+	void init(QOpenGLFunctions &f) override;
 
-	void deinit(
-		not_null<QOpenGLWidget*> widget,
-		QOpenGLFunctions *f) override;
+	void deinit(QOpenGLFunctions *f) override;
 
 	void paint(
 		not_null<QOpenGLWidget*> widget,
@@ -130,6 +126,7 @@ private:
 	const not_null<Viewport*> _owner;
 
 	GLfloat _factor = 1.;
+	int _ifactor = 1;
 	QSize _viewport;
 	bool _rgbaFrame = false;
 	bool _userpicFrame;

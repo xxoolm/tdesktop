@@ -9,11 +9,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "lang/lang_keys.h"
 #include "core/application.h"
+#include "core/update_channel.h"
+#include "core/version.h"
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "storage/storage_domain.h"
 #include "data/data_session.h"
-#include "base/qt_adapters.h"
+#include "base/qt/qt_common_adapters.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
 
@@ -23,108 +25,23 @@ namespace {
 std::map<int, const char*> BetaLogs() {
 	return {
 	{
-		2009004,
-		"- Choose one from dozens of new gorgeous animated backgrounds"
-		" in Chat Settings > Chat background.\n"
+		4008011,
+		"- Fix initial video playback speed.\n"
+
+		"- Use native window resize on Windows 11.\n"
+
+		"- Fix memory leak in Direct3D 11 media viewer on Windows.\n"
 	},
 	{
-		2009005,
-		"- Tile chat background patterns horizontally.\n"
+		4010004,
+		"- Statistics in channels and group chats.\n"
 
-		"- Fix a rare crash in spellchecker on Windows.\n"
+		"- Nice looking code blocks with syntax highlight.\n"
 
-		"- Fix animated chat backgrounds in Saved Messages.\n"
+		"- Copy full code block by click on its header.\n"
 
-		"- Fix \"Sorry, group is inaccessible\" message "
-		"in scheduled voice chats.\n",
-	},
-	{
-		2009013,
-		"- See unread comments count when scrolling discussions in channels."
-	},
-	{
-		3000002,
-		"- Check who've seen your message in small groups "
-		"from the context menu.\n"
-
-		"- Enable recording with video in live streams and video chats."
-	},
-	{
-		3000004,
-		"- Fix a crash when joining video chat or live broadcast.\n"
-
-		"- Add a \"Close to Taskbar\" option when tray icon is disabled "
-		"(Windows and Linux)."
-	},
-	{
-		3000005,
-		"- Add support for Emoji 13.1."
-	},
-	{
-		3001002,
-		"- Control video in fullscreen mode using arrows and numbers.\n"
-
-		"- Open locations in browser if default Bing Maps is not installed.\n"
-
-		"- Reconnect without timeout when network availability changes.\n"
-
-		"- Crash fixes."
-	},
-	{
-		3001005,
-		"- Choose one of 8 new preset themes for any individual private chat.\n"
-
-		"- Click on '...' menu > 'Change Colors' to pick a theme.\n"
-
-		"- Both chat participants will see the same theme in that chat "
-		"– on all their devices.\n"
-
-		"- Each new theme features colorful gradient message bubbles, "
-		"beautifully animated backgrounds and unique background patterns.\n"
-
-		"- All chat themes have day and night versions and will follow "
-		"your overall dark mode settings.\n"
-
-		"- Implement main window rounded corners on Windows 11.\n"
-
-		"- Fix audio capture from AirPods on macOS.\n"
-	},
-	{
-		3001006,
-		"- Show small media previews in chats list.\n"
-
-		"- Show media album previews and caption text in chats list.\n"
-
-		"- Add \"Quick Reply\" and \"Mark as Read\" "
-		"to native Windows notifications.\n"
-	},
-	{
-		3001012,
-		"- Create special invite links that require admins "
-		"to approve users before they become members.\n"
-
-		"- Admins can view the applicants' profiles and bios "
-		"by tapping the Join Requests bar at the top of the chat.\n"
-
-		"- Add internal labels to your chat's Invite Links "
-		"to keep them organized.\n"
-
-		"- Run natively on Apple Silicon (macOS only).\n"
-	},
-	{
-		3001013,
-		"- Fix requests to groups / channels processing.\n"
-
-		"- Fix internal link previews with View Content button layout.\n"
-
-		"- Fix crash in messages search with imported messages results.\n"
-
-		"- Don't use fractional system UI scaling on Linux.\n"
-
-		"- Fix invite link icons on macOS.\n"
-
-		"- Several crash fixes.\n"
-	},
+		"- Send a highlighted code block using ```language syntax.\n"
+	}
 	};
 };
 
@@ -136,13 +53,17 @@ Changelogs::Changelogs(not_null<Main::Session*> session, int oldVersion)
 	_session->data().chatsListChanges(
 	) | rpl::filter([](Data::Folder *folder) {
 		return !folder;
-	}) | rpl::start_with_next([=] {
+	}) | rpl::on_next([=] {
 		requestCloudLogs();
 	}, _chatsSubscription);
 }
 
 std::unique_ptr<Changelogs> Changelogs::Create(
 		not_null<Main::Session*> session) {
+	if (BuildIsCanary) {
+		// Canary changelogs live in the canary channels themselves.
+		return nullptr;
+	}
 	auto &local = Core::App().domain().local();
 	const auto oldVersion = local.oldVersion();
 	local.clearOldVersion();
@@ -220,7 +141,7 @@ void Changelogs::addBetaLog(int changeVersion, const char *changes) {
 	}
 	const auto text = [&] {
 		static const auto simple = u"\n- "_q;
-		static const auto separator = QString::fromUtf8("\n\xE2\x80\xA2 ");
+		static const auto separator = '\n' + Ui::kQBullet + ' ';
 		auto result = QString::fromUtf8(changes).trimmed();
 		if (result.startsWith(base::StringViewMid(simple, 1))) {
 			result = separator.mid(1) + result.mid(simple.size() - 1);
@@ -228,7 +149,7 @@ void Changelogs::addBetaLog(int changeVersion, const char *changes) {
 		return result.replace(simple, separator);
 	}();
 	const auto version = FormatVersionDisplay(changeVersion);
-	const auto log = qsl("New in version %1 beta:\n\n").arg(version) + text;
+	const auto log = u"New in version %1 beta:\n\n"_q.arg(version) + text;
 	addLocalLog(log);
 }
 

@@ -16,18 +16,31 @@ class palette;
 struct colorizer;
 } // namespace style
 
+namespace Ui::Text {
+class CustomEmoji;
+} // namespace Ui::Text
+
 namespace Ui {
 
 class ChatStyle;
 struct ChatPaintContext;
 struct BubblePattern;
 
+struct ChatThemeGiftSymbol {
+	QRectF area;
+	float64 rotation = 0.;
+};
+
 struct ChatThemeBackground {
+	QString key;
 	QImage prepared;
 	QImage preparedForTiled;
 	QImage gradientForFill;
 	std::optional<QColor> colorForFill;
 	std::vector<QColor> colors;
+	std::vector<ChatThemeGiftSymbol> giftSymbols;
+	QImage giftSymbolFrame;
+	uint64_t giftId = 0;
 	float64 patternOpacity = 1.;
 	int gradientRotation = 0;
 	bool isPattern = false;
@@ -42,13 +55,18 @@ bool operator==(const ChatThemeBackground &a, const ChatThemeBackground &b);
 bool operator!=(const ChatThemeBackground &a, const ChatThemeBackground &b);
 
 struct ChatThemeBackgroundData {
+	QString key;
 	QString path;
 	QByteArray bytes;
+	QImage giftSymbolFrame;
+	uint64 giftId = 0;
 	bool gzipSvg = false;
 	std::vector<QColor> colors;
 	bool isPattern = false;
 	float64 patternOpacity = 0.;
+	int darkModeDimming = 0;
 	bool isBlurred = false;
+	bool forDarkMode = false;
 	bool generateGradient = false;
 	int gradientRotation = 0;
 };
@@ -56,6 +74,7 @@ struct ChatThemeBackgroundData {
 struct ChatThemeBubblesData {
 	std::vector<QColor> colors;
 	std::optional<QColor> accent;
+	bool dark = false;
 };
 
 struct CacheBackgroundRequest {
@@ -65,8 +84,9 @@ struct CacheBackgroundRequest {
 	float64 gradientProgress = 1.;
 
 	explicit operator bool() const {
-		return !background.prepared.isNull()
-			|| !background.gradientForFill.isNull();
+		return !area.isEmpty()
+			&& (!background.prepared.isNull()
+				|| !background.gradientForFill.isNull());
 	}
 };
 
@@ -83,8 +103,13 @@ struct CacheBackgroundResult {
 	QSize area;
 	int x = 0;
 	int y = 0;
+	QRect giftArea;
+	float64 giftRotation = 0;
 	bool waitingForNegativePattern = false;
 };
+
+[[nodiscard]] CacheBackgroundResult CacheBackground(
+	const CacheBackgroundRequest &request);
 
 struct CachedBackground {
 	CachedBackground() = default;
@@ -94,6 +119,9 @@ struct CachedBackground {
 	QSize area;
 	int x = 0;
 	int y = 0;
+	QRect giftArea;
+	float64 giftRotation = 0.;
+	mutable std::unique_ptr<Text::CustomEmoji> gift;
 	bool waitingForNegativePattern = false;
 };
 
@@ -110,26 +138,10 @@ struct ChatThemeKey {
 	explicit operator bool() const {
 		return (id != 0);
 	}
-};
 
-inline bool operator<(ChatThemeKey a, ChatThemeKey b) {
-	return (a.id < b.id) || ((a.id == b.id) && (a.dark < b.dark));
-}
-inline bool operator>(ChatThemeKey a, ChatThemeKey b) {
-	return (b < a);
-}
-inline bool operator<=(ChatThemeKey a, ChatThemeKey b) {
-	return !(b < a);
-}
-inline bool operator>=(ChatThemeKey a, ChatThemeKey b) {
-	return !(a < b);
-}
-inline bool operator==(ChatThemeKey a, ChatThemeKey b) {
-	return (a.id == b.id) && (a.dark == b.dark);
-}
-inline bool operator!=(ChatThemeKey a, ChatThemeKey b) {
-	return !(a == b);
-}
+	friend inline auto operator<=>(ChatThemeKey, ChatThemeKey) = default;
+	friend inline bool operator==(ChatThemeKey, ChatThemeKey) = default;
+};
 
 struct ChatThemeDescriptor {
 	ChatThemeKey key;
@@ -163,15 +175,22 @@ public:
 	[[nodiscard]] const BubblePattern *bubblesBackgroundPattern() const {
 		return _bubblesBackgroundPattern.get();
 	}
+	void finishCreateOnMain(); // Called on_main after setBubblesBackground.
 
 	[[nodiscard]] ChatPaintContext preparePaintContext(
 		not_null<const ChatStyle*> st,
 		QRect viewport,
-		QRect clip);
+		QRect area,
+		QRect clip,
+		bool paused);
 	[[nodiscard]] const BackgroundState &backgroundState(QSize area);
 	void clearBackgroundState();
 	[[nodiscard]] rpl::producer<> repaintBackgroundRequests() const;
 	void rotateComplexGradientBackground();
+
+	[[nodiscard]] CacheBackgroundRequest cacheBackgroundRequest(
+		QSize area,
+		int addRotation = 0) const;
 
 private:
 	void cacheBackground();
@@ -180,9 +199,6 @@ private:
 		const CacheBackgroundRequest &request,
 		Fn<void(CacheBackgroundResult&&)> done = nullptr);
 	void setCachedBackground(CacheBackgroundResult &&cached);
-	[[nodiscard]] CacheBackgroundRequest cacheBackgroundRequest(
-		QSize area,
-		int addRotation = 0) const;
 	[[nodiscard]] bool readyForBackgroundRotation() const;
 	void generateNextBackgroundRotation();
 
@@ -203,9 +219,11 @@ private:
 	ChatThemeKey _key;
 	std::unique_ptr<style::palette> _palette;
 	ChatThemeBackground _mutableBackground;
+	std::optional<QColor> _backgroundAverage;
 	BackgroundState _backgroundState;
 	Animations::Simple _backgroundFade;
 	CacheBackgroundRequest _backgroundCachingRequest;
+	CacheBackgroundRequest _nextCachingRequest;
 	CacheBackgroundResult _backgroundNext;
 	QSize _cacheBackgroundArea;
 	crl::time _lastBackgroundAreaChangeTime = 0;
@@ -213,6 +231,7 @@ private:
 
 	CachedBackground _bubblesBackground;
 	QImage _bubblesBackgroundPrepared;
+	std::optional<QColor> _bubblesBackgroundAverage;
 	CacheBackgroundRequest _bubblesCachingRequest;
 	QSize _cacheBubblesArea;
 	crl::time _lastBubblesAreaChangeTime = 0;
@@ -244,10 +263,15 @@ struct ChatBackgroundRects {
 	const QImage &image);
 [[nodiscard]] QImage PrepareImageForTiled(const QImage &prepared);
 
-[[nodiscard]] QImage ReadBackgroundImage(
+struct BackgroundImageFields {
+	QImage image;
+	std::vector<ChatThemeGiftSymbol> giftSymbols;
+};
+[[nodiscard]] BackgroundImageFields ReadBackgroundImage(
 	const QString &path,
 	const QByteArray &content,
-	bool gzipSvg);
+	bool gzipSvg,
+	bool findGiftSymbols = false);
 [[nodiscard]] QImage GenerateBackgroundImage(
 	QSize size,
 	const std::vector<QColor> &bg,
@@ -266,5 +290,11 @@ struct ChatBackgroundRects {
 	int rotation);
 [[nodiscard]] ChatThemeBackground PrepareBackgroundImage(
 	const ChatThemeBackgroundData &data);
+[[nodiscard]] std::vector<QColor> BubblesGradientColors(
+	const ChatThemeBubblesData &data);
+[[nodiscard]] QImage PrepareBubblesBackground(
+	const ChatThemeBubblesData &data);
+[[nodiscard]] QImage PrepareGiftSymbol(
+	const std::unique_ptr<Text::CustomEmoji> &emoji);
 
 } // namespace Ui

@@ -13,6 +13,7 @@ namespace Data {
 class Media;
 } // namespace Data
 
+struct FullMsgId;
 struct WebPageData;
 
 namespace HistoryView {
@@ -21,16 +22,28 @@ struct TextState;
 
 class ViewButton {
 public:
-	ViewButton(not_null<PeerData*> peer, Fn<void()> updateCallback);
-	ViewButton(not_null<Data::Media*> media, Fn<void()> updateCallback);
+	enum class Kind {
+		Giveaway,
+		RichMessage,
+	};
+
+	ViewButton(
+		not_null<Data::Media*> media,
+		uint8 colorIndex,
+		Fn<void()> updateCallback);
+	ViewButton(
+		FullMsgId itemId,
+		uint8 colorIndex,
+		Fn<void()> updateCallback);
 	~ViewButton();
 
 	[[nodiscard]] static bool MediaHasViewButton(
 		not_null<Data::Media*> media);
-	[[nodiscard]] static bool MediaHasViewButton(
-		not_null<WebPageData*> webpage);
 
+	[[nodiscard]] bool matches(not_null<Data::Media*> media) const;
+	[[nodiscard]] bool matches(FullMsgId itemId) const;
 	[[nodiscard]] int height() const;
+	[[nodiscard]] bool belowMessageInfo() const;
 
 	void draw(
 		Painter &p,

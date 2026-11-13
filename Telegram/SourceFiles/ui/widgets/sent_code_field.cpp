@@ -19,7 +19,10 @@ SentCodeField::SentCodeField(
 	rpl::producer<QString> placeholder,
 	const QString &val)
 : Ui::InputField(parent, st, std::move(placeholder), val) {
-	connect(this, &Ui::InputField::changed, [this] { fix(); });
+	setInputMethodHints(Qt::ImhDigitsOnly
+		| Qt::ImhNoPredictiveText
+		| Qt::ImhSensitiveData);
+	changes() | rpl::on_next([=] { fix(); }, lifetime());
 }
 
 void SentCodeField::setAutoSubmit(int length, Fn<void()> submitCallback) {
@@ -34,9 +37,7 @@ void SentCodeField::setChangedCallback(Fn<void()> changedCallback) {
 QString SentCodeField::getDigitsOnly() const {
 	return QString(
 		getLastText()
-	).remove(
-		QRegularExpression("[^\\d]")
-	);
+	).remove(TextUtilities::RegExpDigitsExclude());
 }
 
 void SentCodeField::fix() {
